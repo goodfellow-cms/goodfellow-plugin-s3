@@ -1,0 +1,54 @@
+{
+  "name": "goodfellow-plugin-s3",
+  "version": "0.1.0",
+  "description": "Keeps a Goodfellow site's media in any S3-compatible storage, such as Amazon S3, Cloudflare R2 or Backblaze B2, instead of the site's repository.",
+  "keywords": [
+    "goodfellow-plugin",
+    "goodfellow",
+    "s3",
+    "media",
+    "cloudflare-r2",
+    "backblaze-b2"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/goodfellow-cms/goodfellow-plugin-s3.git"
+  },
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./admin": {
+      "types": "./dist/admin.d.ts",
+      "default": "./dist/admin.js"
+    }
+  },
+  "files": [
+    "dist",
+    "goodfellow-plugin.json"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node scripts/manifest.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "biome check ."
+  },
+  "peerDependencies": {
+    "@goodfellow-cms/core": "^0.6.0"
+  },
+  "peerDependenciesMeta": {
+    "@goodfellow-cms/core": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.15",
+    "@types/node": "^22.20.5",
+    "typescript": "5.9.3",
+    "vite": "8.3.4",
+    "vitest": "5.0.3"
+  }
+}

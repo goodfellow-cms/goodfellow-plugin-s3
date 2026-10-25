@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "title": "S3 storage",
+  "description": "Keeps the site's media in any S3-compatible storage, such as Amazon S3, Cloudflare R2 or Backblaze B2.",
+  "permissions": {
+    "connect": [
+      "https://*.amazonaws.com",
+      "https://*.r2.cloudflarestorage.com",
+      "https://*.backblazeb2.com",
+      "https://*.digitaloceanspaces.com",
+      "https://*.wasabisys.com",
+      "https://*.linodeobjects.com",
+      "https://storage.googleapis.com"
+    ],
+    "files": ["content/s3-storage.json", "content/media-storage.json"]
+  },
+  "admin": true,
+  "screens": [
+    {
+      "id": "settings",
+      "title": "S3 storage"
+    }
+  ],
+  "mediaStorage": true
+}
