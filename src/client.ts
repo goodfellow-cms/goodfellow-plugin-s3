@@ -1,10 +1,10 @@
 /**
- * Putting and deleting the site's media in the bucket, signed with the
- * editor's keys. Requests come from the plugin's sandboxed frame, whose origin
- * is `null`, so the bucket's CORS settings must allow any origin (`*`).
+ * Putting and deleting the site's media in the bucket, at addresses signed
+ * where the keys are (`signing.ts`). Requests come from the plugin's
+ * sandboxed frame, whose origin is `null`, so the bucket's CORS settings must
+ * allow PUT and DELETE from any origin (`*`).
  */
-import { objectKey, objectUrl, type StorageSettings } from "./settings.js";
-import { type Credentials, EMPTY_PAYLOAD, signRequest, UNSIGNED_PAYLOAD } from "./sigv4.js";
+import type { SignedRequest } from "./signing.js";
 
 /** The bucket refused a request, or couldn't be reached, with what it said in words for the editor. */
 export class StorageError extends Error {
@@ -27,7 +27,7 @@ async function refusal(response: Response, what: string): Promise<StorageError> 
   const said = /<Message>([^<]*)<\/Message>/.exec(text)?.[1];
   const advice =
     response.status === 403
-      ? " Check that your keys can put and delete files in this bucket."
+      ? " Check that the site's keys can put and delete files in this bucket."
       : response.status === 404
         ? " Check the bucket's name and the service's address."
         : "";
@@ -38,91 +38,42 @@ async function refusal(response: Response, what: string): Promise<StorageError> 
   );
 }
 
-async function send(
-  settings: StorageSettings,
-  credentials: Credentials,
-  request: { method: "PUT" | "DELETE"; key: string; body?: Blob; type?: string },
+/** Makes a signed request, with a file's contents for a PUT. */
+export async function sendSigned(
+  request: SignedRequest,
   what: string,
-  fetcher: typeof fetch,
+  body?: Blob,
+  fetcher: typeof fetch = fetch,
 ): Promise<void> {
-  const url = objectUrl(settings, request.key);
-  const headers = await signRequest({
-    method: request.method,
-    url,
-    // The type's signed too, so the file is served as what it is.
-    headers: request.type ? { "content-type": request.type } : {},
-    payloadHash: request.body ? UNSIGNED_PAYLOAD : EMPTY_PAYLOAD,
-    credentials,
-    region: settings.region,
-  });
   let response: Response;
   try {
-    response = await fetcher(url, {
+    response = await fetcher(request.url, {
       method: request.method,
-      headers,
-      ...(request.body && { body: request.body }),
+      headers: request.headers,
+      ...(body && { body }),
       cache: "no-store",
       credentials: "omit",
     });
   } catch {
     throw new StorageError(
-      `The storage at ${settings.endpoint} didn't answer. Check its address, and that the bucket's CORS settings allow PUT and DELETE from any origin.`,
+      `The storage at ${new URL(request.url).origin} didn't answer. Check its address, and that the bucket's CORS settings allow PUT and DELETE from any origin.`,
     );
   }
   // Deleting a file that isn't there is done too.
   if (!response.ok && !(request.method === "DELETE" && response.status === 404)) throw await refusal(response, what);
 }
 
-/** Keeps a file at its media address, replacing any there. */
-export function putMedia(
-  settings: StorageSettings,
-  credentials: Credentials,
-  file: { address: string; type: string; data: Blob },
-  fetcher: typeof fetch = fetch,
-): Promise<void> {
-  return send(
-    settings,
-    credentials,
-    {
-      method: "PUT",
-      key: objectKey(settings, file.address),
-      body: file.data,
-      type: file.type || "application/octet-stream",
-    },
-    `keep ${file.address}`,
-    fetcher,
+/** Whether an answer is a list of signed requests, as the task and the server module give them. */
+export function isSignedRequests(value: unknown): value is SignedRequest[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (request) =>
+        (request?.method === "PUT" || request?.method === "DELETE") &&
+        typeof request.url === "string" &&
+        /^https?:\/\//.test(request.url) &&
+        typeof request.headers === "object" &&
+        request.headers !== null,
+    )
   );
-}
-
-/** Removes a file by its media address. */
-export function deleteMedia(
-  settings: StorageSettings,
-  credentials: Credentials,
-  address: string,
-  fetcher: typeof fetch = fetch,
-): Promise<void> {
-  return send(
-    settings,
-    credentials,
-    { method: "DELETE", key: objectKey(settings, address) },
-    `remove ${address}`,
-    fetcher,
-  );
-}
-
-/** Puts a small file and deletes it again, to check the address, keys and CORS settings work together. */
-export async function checkStorage(
-  settings: StorageSettings,
-  credentials: Credentials,
-  fetcher: typeof fetch = fetch,
-): Promise<void> {
-  const key = `${settings.folder}.goodfellow-check`;
-  await send(
-    settings,
-    credentials,
-    { method: "PUT", key, body: new Blob(["ok"], { type: "text/plain" }), type: "text/plain" },
-    "keep a test file",
-    fetcher,
-  );
-  await send(settings, credentials, { method: "DELETE", key }, "remove the test file", fetcher);
 }

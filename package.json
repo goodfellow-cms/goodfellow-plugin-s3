@@ -24,6 +24,14 @@
     "./admin": {
       "types": "./dist/admin.d.ts",
       "default": "./dist/admin.js"
+    },
+    "./sign": {
+      "types": "./dist/sign.d.ts",
+      "default": "./dist/sign.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "default": "./dist/server.js"
     }
   },
   "files": [

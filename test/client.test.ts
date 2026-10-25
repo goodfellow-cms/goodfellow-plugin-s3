@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { checkStorage, deleteMedia, putMedia, StorageError } from "../src/client.js";
+import { isSignedRequests, StorageError, sendSigned } from "../src/client.js";
 import { objectKey, objectUrl, type StorageSettings } from "../src/settings.js";
+import { type SignedRequest, signRequests } from "../src/signing.js";
 import { fakeS3 } from "./fake-s3.js";
 
 const settings: StorageSettings = {
@@ -13,47 +14,71 @@ const settings: StorageSettings = {
 const credentials = { accessKeyId: "KEY", secretAccessKey: "SECRET" };
 
 describe("the bucket", () => {
-  it("keeps and removes files at their media addresses, signed with the editor's keys", async () => {
+  it("keeps and removes files at their signed addresses", async () => {
     const s3 = fakeS3({ keys: { KEY: "SECRET" } });
-    await putMedia(
+    const [put] = await signRequests(
+      { action: "upload", files: [{ address: "/media/sermon.mp4", type: "video/mp4" }] },
       settings,
       credentials,
-      { address: "/media/sermon.mp4", type: "video/mp4", data: new Blob(["video"]) },
-      s3.fetch,
     );
-    expect(s3.requests[0]?.url).toBe("https://account.r2.cloudflarestorage.com/parish-media/site/sermon.mp4");
+    await sendSigned(put as SignedRequest, "keep it", new Blob(["video"]), s3.fetch);
+    expect(s3.requests[0]?.url).toMatch(
+      /^https:\/\/account\.r2\.cloudflarestorage\.com\/parish-media\/site\/sermon\.mp4\?/,
+    );
     expect(s3.objects.get("parish-media/site/sermon.mp4")?.type).toBe("video/mp4");
     expect(new TextDecoder().decode(s3.objects.get("parish-media/site/sermon.mp4")?.body)).toBe("video");
-    await deleteMedia(settings, credentials, "/media/sermon.mp4", s3.fetch);
+    const [remove] = await signRequests({ action: "remove", addresses: ["/media/sermon.mp4"] }, settings, credentials);
+    await sendSigned(remove as SignedRequest, "remove it", undefined, s3.fetch);
     expect(s3.objects.size).toBe(0);
     // A file that's already gone is removed too.
-    await deleteMedia(settings, credentials, "/media/sermon.mp4", s3.fetch);
+    await sendSigned(remove as SignedRequest, "remove it", undefined, s3.fetch);
   });
 
-  it("says what the bucket refused", async () => {
-    const s3 = fakeS3({ keys: { KEY: "OTHER" } });
-    const refused = putMedia(
+  it("says what the bucket refused, such as an upload of another type than was signed", async () => {
+    const s3 = fakeS3({ keys: { KEY: "SECRET" } });
+    const [put] = await signRequests(
+      { action: "upload", files: [{ address: "/media/a.jpg", type: "image/jpeg" }] },
       settings,
       credentials,
-      { address: "/media/a.jpg", type: "image/jpeg", data: new Blob(["x"]) },
+    );
+    const refused = sendSigned(
+      { ...(put as SignedRequest), headers: { "content-type": "text/html" } },
+      "keep a.jpg",
+      new Blob(["x"]),
       s3.fetch,
     );
     await expect(refused).rejects.toThrow(StorageError);
     await expect(refused).rejects.toThrow(/403 SignatureDoesNotMatch.*put and delete files/);
   });
 
+  it("refuses addresses once they've expired", async () => {
+    const s3 = fakeS3({ keys: { KEY: "SECRET" }, now: () => new Date("2026-10-25T12:00:00Z") });
+    const [put] = await signRequests(
+      { action: "upload", files: [{ address: "/media/a.jpg", type: "image/jpeg" }] },
+      settings,
+      credentials,
+      new Date("2026-10-25T10:00:00Z"),
+    );
+    await expect(sendSigned(put as SignedRequest, "keep a.jpg", new Blob(["x"]), s3.fetch)).rejects.toThrow(
+      /403 AccessDenied/,
+    );
+  });
+
   it("says when the bucket can't be reached, such as without CORS settings", async () => {
     const failing = (async () => {
       throw new TypeError("Failed to fetch");
     }) as typeof fetch;
-    await expect(checkStorage(settings, credentials, failing)).rejects.toThrow(/CORS settings allow PUT and DELETE/);
+    const [put] = await signRequests({ action: "check" }, settings, credentials);
+    await expect(sendSigned(put as SignedRequest, "keep a test file", new Blob(["ok"]), failing)).rejects.toThrow(
+      /CORS settings allow PUT and DELETE/,
+    );
   });
 
-  it("tries the bucket with a file it removes again", async () => {
-    const s3 = fakeS3({ keys: { KEY: "SECRET" } });
-    await checkStorage(settings, credentials, s3.fetch);
-    expect(s3.requests.map((request) => request.method)).toEqual(["PUT", "DELETE"]);
-    expect(s3.objects.size).toBe(0);
+  it("takes only signed requests from the task or the server", () => {
+    expect(isSignedRequests([{ method: "PUT", url: "https://bucket.example/a", headers: {} }])).toBe(true);
+    expect(isSignedRequests([{ method: "GET", url: "https://bucket.example/a", headers: {} }])).toBe(false);
+    expect(isSignedRequests([{ method: "PUT", url: "javascript:alert(1)", headers: {} }])).toBe(false);
+    expect(isSignedRequests({})).toBe(false);
   });
 
   it("keeps only media addresses, in the site's folder", () => {

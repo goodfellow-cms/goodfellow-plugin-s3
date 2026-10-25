@@ -18,6 +18,8 @@ describe("the package", () => {
       permissions: plugin.permissions,
       admin: true,
       screens: plugin.screens,
+      tasks: plugin.tasks?.map(({ id, title }) => ({ id, title })),
+      server: true,
       mediaStorage: true,
     });
   });

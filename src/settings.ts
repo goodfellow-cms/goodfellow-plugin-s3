@@ -1,8 +1,7 @@
 /**
  * Where the site's media is kept: the bucket, the service's address and the
  * address the files are public at, in `content/s3-storage.json`, which holds
- * no keys. Each editor gives their own keys in the admin panel, which keeps
- * them in their browser.
+ * no keys: they stay in the site's CI secrets or a full-stack site's server.
  */
 import { uriEncode } from "./sigv4.js";
 

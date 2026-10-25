@@ -1,11 +1,12 @@
 /**
  * The plugin's admin module, which runs in its own sandboxed frame in the
  * admin panel: the settings screen, and the media storage the admin panel's
- * Media screen uploads through. Requests go straight from the frame to the
- * bucket, signed with the editor's own keys, which the admin panel keeps for
- * the plugin in the editor's browser.
+ * Media screen uploads through. The keys never reach the browser: the site's
+ * CI signs each batch of requests with the keys in its secrets (the `sign`
+ * task, about a minute), or a full-stack site's server does straight away,
+ * and the frame sends files to the bucket at the signed addresses.
  */
-import { checkStorage, deleteMedia, putMedia, StorageError } from "./client.js";
+import { isSignedRequests, StorageError, sendSigned } from "./client.js";
 import {
   MEDIA_STORAGE_FILE,
   parseSettings,
@@ -19,11 +20,11 @@ import {
   storedMediaText,
   tidySettings,
 } from "./settings.js";
-import type { Credentials } from "./sigv4.js";
-import type { PluginAdmin, PluginAdminApi, PluginMediaReady } from "./types.js";
+import { KEY_ID_SECRET, SECRET_KEY_SECRET, type SignedRequest, type SignInput } from "./signing.js";
+import type { PluginAdmin, PluginAdminApi, PluginMediaFile, PluginMediaReady } from "./types.js";
 
-const KEY_ID = "accessKeyId";
-const SECRET = "secretAccessKey";
+/** How many files go to the bucket at once. */
+const PARALLEL = 3;
 
 /** The settings and Goodfellow's list of stored media, as the site has them. */
 async function loadSite(api: PluginAdminApi): Promise<{ settings?: StorageSettings; stored?: StoredMediaFile }> {
@@ -31,14 +32,6 @@ async function loadSite(api: PluginAdminApi): Promise<{ settings?: StorageSettin
   const settings = parseSettings(files[SETTINGS_FILE]);
   const stored = parseStoredMedia(files[MEDIA_STORAGE_FILE]);
   return { ...(settings && { settings }), ...(stored && { stored }) };
-}
-
-/** The editor's keys, where they've given both. */
-export async function editorCredentials(api: PluginAdminApi): Promise<Credentials | undefined> {
-  const keys = await api.keys.get();
-  const accessKeyId = keys?.[KEY_ID]?.trim();
-  const secretAccessKey = keys?.[SECRET]?.trim();
-  return accessKeyId && secretAccessKey ? { accessKeyId, secretAccessKey } : undefined;
 }
 
 /** Whether the plugin's frame may reach an address: its Content Security Policy allows only what it declared. */
@@ -69,24 +62,93 @@ async function notReady(api: PluginAdminApi): Promise<Exclude<PluginMediaReady, 
       screen: "settings",
     };
   }
-  if (!(await editorCredentials(api))) {
-    return {
-      ready: false,
-      message: "Give your keys for the bucket in its settings first. Each editor uses their own.",
-      screen: "settings",
-    };
-  }
   return undefined;
 }
 
-/** The settings and keys an upload or removal needs, or why there are none. */
-async function ready(api: PluginAdminApi): Promise<{ settings: StorageSettings; credentials: Credentials }> {
+/** Throws, in words for the editor, where the storage can't take or remove files now. */
+async function ready(api: PluginAdminApi): Promise<void> {
   const problem = await notReady(api);
   if (problem) throw new StorageError(problem.message);
-  const { settings } = await loadSite(api);
-  const credentials = await editorCredentials(api);
-  if (!settings || !credentials) throw new StorageError("S3 storage isn't set up.");
-  return { settings, credentials };
+}
+
+/**
+ * Has requests signed where the keys are: a full-stack site's server, where
+ * it has them, straight away, or else the site's CI, through the `sign` task.
+ */
+export async function signed(api: PluginAdminApi, input: SignInput): Promise<SignedRequest[]> {
+  if (api.plugin.server) {
+    const answer = await api
+      .server("sign", { method: "POST", body: JSON.stringify(input), headers: { "content-type": "application/json" } })
+      .catch(() => undefined);
+    if (answer?.status === 200) {
+      const { requests } = JSON.parse(answer.body) as { requests?: unknown };
+      if (isSignedRequests(requests)) return requests;
+    }
+    if (answer?.status === 400) {
+      const { message } = JSON.parse(answer.body) as { message?: unknown };
+      throw new StorageError(typeof message === "string" ? message : "The site's server didn't sign the upload.");
+    }
+    // Without keys of its own, the server leaves it to the CI.
+  }
+  const requests = await api.task("sign", input);
+  if (!isSignedRequests(requests)) throw new StorageError("The site's build service didn't sign the upload.");
+  return requests;
+}
+
+/** Runs `send` for each item, a few at a time, stopping at the first that fails. */
+async function eachLimited<T>(items: readonly T[], send: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) await send(items[next++] as T);
+  };
+  await Promise.all(Array.from({ length: Math.min(PARALLEL, items.length) }, worker));
+}
+
+/** Keeps files in the bucket at their media addresses, signed together. */
+export async function uploadFiles(
+  api: PluginAdminApi,
+  files: readonly PluginMediaFile[],
+  fetcher: typeof fetch = fetch,
+): Promise<void> {
+  if (files.length === 0) return;
+  await ready(api);
+  const requests = await signed(api, {
+    action: "upload",
+    files: files.map(({ address, type }) => ({ address, type: type || "application/octet-stream" })),
+  });
+  const byAddress = new Map(requests.map((request) => [request.address, request]));
+  await eachLimited(files, async (file) => {
+    const request = byAddress.get(file.address);
+    if (request?.method !== "PUT") throw new StorageError(`The upload of ${file.address} wasn't signed.`);
+    await sendSigned(request, `keep ${file.address}`, file.data, fetcher);
+  });
+}
+
+/** Removes files from the bucket by their media addresses. */
+export async function removeFiles(
+  api: PluginAdminApi,
+  addresses: readonly string[],
+  fetcher: typeof fetch = fetch,
+): Promise<void> {
+  if (addresses.length === 0) return;
+  await ready(api);
+  const requests = await signed(api, { action: "remove", addresses: [...addresses] });
+  const failed: string[] = [];
+  await eachLimited(requests, async (request) => {
+    await sendSigned(request, `remove ${request.address}`, undefined, fetcher).catch(() => {
+      failed.push(request.address ?? "");
+    });
+  });
+  if (failed.length > 0) throw new StorageError(`The storage kept ${failed.join(", ")}.`);
+}
+
+/** Puts a small file and deletes it again, to try the settings, the site's keys and the bucket's CORS settings. */
+export async function checkBucket(api: PluginAdminApi, fetcher: typeof fetch = fetch): Promise<void> {
+  await ready(api);
+  const [put, remove] = await signed(api, { action: "check" });
+  if (put?.method !== "PUT" || remove?.method !== "DELETE") throw new StorageError("The test file wasn't signed.");
+  await sendSigned(put, "keep a test file", new Blob(["ok"], { type: "text/plain" }), fetcher);
+  await sendSigned(remove, "remove the test file", undefined, fetcher);
 }
 
 const FIELD_LABELS: Record<SettingsProblem, string> = {
@@ -101,12 +163,11 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** The settings screen: where files are kept, which publishes for the whole site, and the editor's own keys. */
+/** The settings screen: where files are kept, which publishes for the whole site, and where the keys go. */
 async function settingsScreen(element: { ownerDocument: unknown }, api: PluginAdminApi) {
   const root = element as HTMLElement;
   const doc = root.ownerDocument;
   const site = await loadSite(api);
-  const keys = await api.keys.get();
 
   const create = <K extends keyof HTMLElementTagNameMap>(tag: K, text?: string): HTMLElementTagNameMap[K] => {
     const node = doc.createElement(tag);
@@ -248,57 +309,23 @@ async function settingsScreen(element: { ownerDocument: unknown }, api: PluginAd
     openMedia,
   );
 
-  // The editor's own keys, kept in their browser.
-  const yours = create("section");
-  const yoursHeading = create("h2", "Your keys");
-  const yoursIntro = create(
+  // The keys, which stay with the site's CI or server.
+  const keys = create("section");
+  const keysHeading = create("h2", "The bucket's keys");
+  const keysIntro = create(
     "p",
-    "Each editor who uploads gives their own keys, which stay in their browser and are forgotten when they sign out. Use keys that can only put and delete files in this bucket.",
+    `The keys never go into the admin panel. A developer adds them to the site's secrets as ${KEY_ID_SECRET} and ${SECRET_KEY_SECRET}: on GitHub under the repository's Settings → Secrets and variables → Actions, or on GitLab under Settings → CI/CD → Variables, masked. Each upload is then signed by the site's build service, which takes about a minute. On a site with a server of its own, they can go in the server's environment instead, which signs uploads straight away. Use keys that can only put and delete files in this bucket.`,
   );
-  const keyId = field("access-key-id", "Access key ID", keys?.[KEY_ID] ?? "");
-  const secret = field("secret-access-key", "Secret access key", keys?.[SECRET] ?? "", undefined, "password");
-  const rememberWrapper = create("p");
-  const remember = create("input");
-  remember.type = "checkbox";
-  remember.id = "remember";
-  const rememberLabel = create("label", " Remember them on this computer");
-  rememberLabel.htmlFor = "remember";
-  rememberWrapper.append(remember, rememberLabel);
-  const saveKeys = button("Save your keys");
-  const forgetKeys = button("Forget your keys");
   const check = button("Try the bucket");
-  const keysStatus = status();
-  run(saveKeys, keysStatus, async () => {
-    const accessKeyId = keyId.input.value.trim();
-    const secretAccessKey = secret.input.value.trim();
-    if (!accessKeyId || !secretAccessKey) return "Give both the access key ID and the secret access key.";
-    await api.keys.set({ [KEY_ID]: accessKeyId, [SECRET]: secretAccessKey }, { remember: remember.checked });
-    return "Your keys are saved in this browser.";
-  });
-  run(forgetKeys, keysStatus, async () => {
-    await api.keys.set(null);
-    keyId.input.value = "";
-    secret.input.value = "";
-    return "Your keys are forgotten.";
-  });
-  run(check, keysStatus, async () => {
-    const { settings: saved, credentials } = await ready(api);
-    await checkStorage(saved, credentials);
+  const checkStatus = status();
+  run(check, checkStatus, async () => {
+    checkStatus.textContent = "Trying the bucket… This takes about a minute.";
+    await checkBucket(api);
     return "The bucket took a test file and removed it again: uploads will work.";
   });
-  yours.append(
-    yoursHeading,
-    yoursIntro,
-    keyId.wrapper,
-    secret.wrapper,
-    rememberWrapper,
-    saveKeys,
-    forgetKeys,
-    check,
-    keysStatus,
-  );
+  keys.append(keysHeading, keysIntro, check, checkStatus);
 
-  root.append(heading, intro, where, yours);
+  root.append(heading, intro, where, keys);
 }
 
 export default {
@@ -307,17 +334,7 @@ export default {
     async ready(api) {
       return (await notReady(api)) ?? { ready: true };
     },
-    async upload(file, api) {
-      const { settings, credentials } = await ready(api);
-      await putMedia(settings, credentials, file);
-    },
-    async remove(addresses, api) {
-      const { settings, credentials } = await ready(api);
-      const failed: string[] = [];
-      for (const address of addresses) {
-        await deleteMedia(settings, credentials, address).catch(() => failed.push(address));
-      }
-      if (failed.length > 0) throw new StorageError(`The storage kept ${failed.join(", ")}.`);
-    },
+    upload: (files, api) => uploadFiles(api, files),
+    remove: (addresses, api) => removeFiles(api, addresses),
   },
 } satisfies PluginAdmin;

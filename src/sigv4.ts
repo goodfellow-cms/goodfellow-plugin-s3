@@ -1,8 +1,8 @@
 /**
- * AWS Signature Version 4, as every S3-compatible service checks it, with the
- * browser's own Web Crypto. Uploads are signed with `UNSIGNED-PAYLOAD`, which
- * S3 accepts over HTTPS, so a long video is sent as it's read rather than
- * hashed in memory first.
+ * AWS Signature Version 4, as every S3-compatible service checks it, with Web
+ * Crypto, which Node and browsers both have. Uploads are signed with
+ * `UNSIGNED-PAYLOAD`, which S3 accepts over HTTPS, so a long video is sent as
+ * it's read rather than hashed first.
  */
 
 export interface Credentials {
@@ -110,4 +110,58 @@ export async function signRequest(options: SignOptions): Promise<Record<string, 
     ...headers,
     authorization: `AWS4-HMAC-SHA256 Credential=${credentials.accessKeyId}/${scope}, SignedHeaders=${names.join(";")}, Signature=${signature}`,
   };
+}
+
+export interface PresignOptions {
+  method: string;
+  url: URL;
+  /** Headers the request must send with these values, besides `host`, such as `content-type`. */
+  headers?: Record<string, string>;
+  credentials: Credentials;
+  region: string;
+  /** How long the address works for, in seconds: at most a week, as S3 allows. */
+  expires: number;
+  service?: string;
+  date?: Date;
+}
+
+/**
+ * An address that makes one request without the keys: SigV4 in the query
+ * string, as S3's presigned URLs are. Whoever has it can make that request
+ * until it expires, so it's given only to the editor who asked.
+ */
+export async function presignUrl(options: PresignOptions): Promise<string> {
+  const { method, credentials, region, expires } = options;
+  const service = options.service ?? "s3";
+  const timestamp = amzDate(options.date ?? new Date());
+  const day = timestamp.slice(0, 8);
+  const scope = `${day}/${region}/${service}/aws4_request`;
+  const signed: Record<string, string> = {
+    ...Object.fromEntries(
+      Object.entries(options.headers ?? {}).map(([name, value]) => [name.toLowerCase(), value.trim()]),
+    ),
+    host: options.url.host,
+  };
+  const names = Object.keys(signed).sort();
+  const url = new URL(options.url);
+  url.searchParams.set("X-Amz-Algorithm", "AWS4-HMAC-SHA256");
+  url.searchParams.set("X-Amz-Credential", `${credentials.accessKeyId}/${scope}`);
+  url.searchParams.set("X-Amz-Date", timestamp);
+  url.searchParams.set("X-Amz-Expires", String(Math.min(Math.max(1, Math.floor(expires)), 604800)));
+  url.searchParams.set("X-Amz-SignedHeaders", names.join(";"));
+  const canonicalRequest = [
+    method.toUpperCase(),
+    uriEncode(decodeURIComponent(url.pathname), true),
+    canonicalQuery(url),
+    ...names.map((name) => `${name}:${signed[name]}`),
+    "",
+    names.join(";"),
+    UNSIGNED_PAYLOAD,
+  ].join("\n");
+  const stringToSign = ["AWS4-HMAC-SHA256", timestamp, scope, await sha256Hex(canonicalRequest)].join("\n");
+  let key = await hmac(bytes(`AWS4${credentials.secretAccessKey}`), day);
+  for (const part of [region, service, "aws4_request"]) key = await hmac(key, part);
+  const signature = hex(await hmac(key, stringToSign));
+  // In the canonical query's own encoding, so the address sent is the one signed.
+  return `${url.origin}${url.pathname}?${canonicalQuery(url)}&X-Amz-Signature=${signature}`;
 }

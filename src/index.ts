@@ -2,12 +2,15 @@
  * S3 storage for Goodfellow: the site's media kept in any S3-compatible
  * service instead of its repository, so large files such as long videos never
  * go into the repository's history. Content still refers to files as
- * `/media/…`, and builds show them from the bucket's public address.
+ * `/media/…`, and builds show them from the bucket's public address. The keys
+ * stay in the site's CI secrets, or a full-stack site's server, which sign
+ * each upload; the browser sends files straight to the bucket.
  */
 import { MEDIA_STORAGE_FILE, SETTINGS_FILE } from "./settings.js";
+import { KEY_ID_SECRET, SECRET_KEY_SECRET } from "./signing.js";
 import type { GoodfellowPlugin } from "./types.js";
 
-/** Services the admin panel can reach without the site naming them: the S3-compatible ones most sites use. */
+/** Services the admin panel can send files to without the site naming them: the S3-compatible ones most sites use. */
 export const KNOWN_SERVICES = [
   "https://*.amazonaws.com",
   "https://*.r2.cloudflarestorage.com",
@@ -41,9 +44,13 @@ export function s3(options: S3Options = {}): GoodfellowPlugin {
     permissions: {
       connect: [...KNOWN_SERVICES, ...(options.connect ?? [])],
       files: [SETTINGS_FILE, MEDIA_STORAGE_FILE],
+      secrets: [KEY_ID_SECRET, SECRET_KEY_SECRET],
+      read: [SETTINGS_FILE],
     },
     admin: "goodfellow-plugin-s3/admin",
     screens: [{ id: "settings", title: "S3 storage" }],
+    tasks: [{ id: "sign", module: "goodfellow-plugin-s3/sign", title: "Sign uploads to the bucket" }],
+    server: "goodfellow-plugin-s3/server",
     mediaStorage: { maxBytes: MAX_BYTES },
   };
 }

@@ -8,6 +8,8 @@
 export interface PluginPermissions {
   connect?: string[];
   files?: string[];
+  secrets?: string[];
+  read?: string[];
 }
 
 export interface GoodfellowPlugin {
@@ -18,7 +20,21 @@ export interface GoodfellowPlugin {
   permissions?: PluginPermissions;
   admin?: string;
   screens?: { id: string; title: string }[];
+  tasks?: { id: string; module: string; title?: string }[];
+  server?: string;
   mediaStorage?: { maxBytes?: number };
+}
+
+/** What a task gets besides its input. */
+export interface PluginTaskContext {
+  root: string;
+  secrets: Record<string, string>;
+}
+
+/** What a server module is told about a request. */
+export interface PluginServerContext {
+  path: string;
+  editor: { login: string; role: "owner" | "editor" } | null;
 }
 
 export interface PluginDescription {
@@ -26,6 +42,8 @@ export interface PluginDescription {
   title: string;
   id: string;
   permissions: PluginPermissions;
+  /** Whether it has a server module, on a full-stack site. */
+  server?: boolean;
 }
 
 export type PluginFileChange = { path: string; text: string } | { path: string; delete: true };
@@ -36,10 +54,11 @@ export interface PluginAdminApi {
   read(paths: string[]): Promise<Record<string, string | null>>;
   publish(changes: PluginFileChange[], message: string): Promise<{ published: boolean }>;
   navigate(href: string): void;
-  keys: {
-    get(): Promise<Record<string, string> | null>;
-    set(keys: Record<string, string> | null, options?: { remember?: boolean }): Promise<void>;
-  };
+  server(
+    path: string,
+    init?: { method?: string; body?: string; headers?: Record<string, string> },
+  ): Promise<{ status: number; body: string }>;
+  task(id: string, input?: unknown): Promise<unknown>;
 }
 
 export interface PluginMediaFile {
@@ -55,7 +74,7 @@ export interface PluginAdmin {
   screens?: Record<string, (element: { ownerDocument: unknown }, api: PluginAdminApi) => unknown>;
   media?: {
     ready(api: PluginAdminApi): Promise<PluginMediaReady>;
-    upload(file: PluginMediaFile, api: PluginAdminApi): Promise<void>;
+    upload(files: PluginMediaFile[], api: PluginAdminApi): Promise<void>;
     remove(addresses: string[], api: PluginAdminApi): Promise<void>;
   };
 }

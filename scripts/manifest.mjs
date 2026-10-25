@@ -15,6 +15,10 @@ const manifest = {
   ),
   ...(plugin.admin && { admin: true }),
   ...(plugin.screens?.length && { screens: plugin.screens.map(({ id, title }) => ({ id, title })) }),
+  ...(plugin.tasks?.length && {
+    tasks: plugin.tasks.map(({ id, title }) => ({ id, ...(title && { title }) })),
+  }),
+  ...(plugin.server && { server: true }),
   ...(plugin.mediaStorage && { mediaStorage: true }),
 };
 
