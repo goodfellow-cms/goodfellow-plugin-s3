@@ -7,6 +7,10 @@ import { SETTINGS_FILE, settingsText } from "../src/settings.js";
 import { fakeS3 } from "./fake-s3.js";
 
 const settings = {
+  service: "r2",
+  location: "0123456789abcdef0123456789abcdef",
+  ownAddress: true,
+  publicRead: false,
   endpoint: "https://account.r2.cloudflarestorage.com",
   bucket: "parish-media",
   region: "auto",

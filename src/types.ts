@@ -23,6 +23,7 @@ export interface GoodfellowPlugin {
   tasks?: { id: string; module: string; title?: string }[];
   server?: string;
   mediaStorage?: { maxBytes?: number };
+  options?: { [key: string]: unknown };
 }
 
 /** What a task gets besides its input. */
@@ -44,6 +45,8 @@ export interface PluginDescription {
   permissions: PluginPermissions;
   /** Whether it has a server module, on a full-stack site. */
   server?: boolean;
+  /** What the site's config chose for it. */
+  options?: { [key: string]: unknown };
 }
 
 export type PluginFileChange = { path: string; text: string } | { path: string; delete: true };
@@ -59,6 +62,17 @@ export interface PluginAdminApi {
     init?: { method?: string; body?: string; headers?: Record<string, string> },
   ): Promise<{ status: number; body: string }>;
   task(id: string, input?: unknown): Promise<unknown>;
+  secretsHelp(): Promise<PluginSecretsHelp[]>;
+  openSecretsLink(url: string): void;
+}
+
+/** How to add the secrets the plugin declared, for this site, in the admin panel's words. */
+export interface PluginSecretsHelp {
+  where: "development" | "server" | "github" | "gitlab";
+  title: string;
+  link?: { url: string; label: string };
+  steps: { text: string; code?: string }[];
+  notes: string[];
 }
 
 export interface PluginMediaFile {

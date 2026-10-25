@@ -12,7 +12,7 @@ It needs Goodfellow 0.6 or later, with the starters' setup for plugins' tasks: `
 - **Uploading:** the admin panel's Media screen hands each batch of files to the plugin, which runs in a sandboxed frame of its own. The plugin asks the site's CI to sign the uploads, with its `sign` task, which gets only those two secrets and takes about a minute. The task answers with an address for each file that works for an hour and only for putting that file, sealed so only that admin panel can read it, and the frame sends the files straight to the bucket. Then the admin panel publishes the list of files.
 - **Full-stack sites** can keep the keys in their server's environment instead, which signs uploads straight away (see below).
 - **Moving the site's media:** once the plugin is set up, the Media screen offers to move the files already in the site's own files to the bucket, and to move them back (files up to 25 MB), in one publish each.
-- **Settings:** the bucket, the service's address and the files' public address are in `content/s3-storage.json`, which holds no keys.
+- **Settings:** the service, the bucket, its region (or Cloudflare account) and the files' public address are in `content/s3-storage.json`, which holds no keys.
 
 ## Installing
 
@@ -32,19 +32,40 @@ export default defineConfig({
 });
 ```
 
-The admin panel can reach only the services the plugin names: Amazon S3, Cloudflare R2, Backblaze B2, DigitalOcean Spaces, Wasabi, Linode (Akamai) Object Storage and Google Cloud Storage. For another service, such as your own MinIO, add the plugin in the config with its address:
+Owners choose the service from a list: Amazon S3, Cloudflare R2, Backblaze B2, DigitalOcean Spaces, Wasabi, Akamai (Linode) Object Storage and Google Cloud Storage, and give only what it needs to find the bucket, such as its region. The admin panel can reach only those. For another service, such as your own MinIO, a developer adds it in the config, and it joins the list:
 
 ```tsx
 import { s3 } from "goodfellow-plugin-s3";
 
-plugins: [s3({ connect: ["https://minio.example.org"] })],
+plugins: [
+  s3({
+    services: [
+      {
+        id: "minio",
+        name: "Our MinIO server",
+        endpoint: "https://minio.example.org",
+        // Optional: the region it signs for (us-east-1 if not given), and
+        // where its buckets' files are public, with {bucket} for the name.
+        region: "us-east-1",
+        publicUrl: "https://media.example.org/{bucket}",
+      },
+    ],
+  }),
+],
 ```
 
 ## Setting up the bucket
 
-1. **Create a bucket** for the site.
-2. **Make its files public** for reading, the way the service does it: on Cloudflare R2, connect a custom domain or turn on its `r2.dev` address; on Amazon S3, a bucket policy that allows `s3:GetObject` to everyone, or CloudFront in front of it; on Backblaze B2, make the bucket public. The address visitors' browsers read files from is the **public address**.
-3. **Allow the admin panel's requests** in the bucket's CORS settings. The plugin's frame is sandboxed, so its requests come from no origin of their own, and the rule has to allow any:
+The plugin's screen, **Site Settings → S3 storage**, walks through these steps for the service chosen, with the words its dashboard uses.
+
+1. **Create a bucket** for the site, and choose its service, bucket and region on the plugin's screen.
+2. **Make its files public**, so visitors' browsers can show them. The screen says how for the service chosen, and the address they're shown from:
+   - Amazon S3, Backblaze B2, Wasabi and Google Cloud Storage give each bucket an address of their own, which works once the bucket lets anyone read its files (on Amazon S3, turn off *Block public access* and add a bucket policy that allows `s3:GetObject` to everyone; on Backblaze B2, make the bucket public; on Google Cloud Storage, give `allUsers` the *Storage Object Viewer* role).
+   - DigitalOcean Spaces and Akamai (Linode) Object Storage need nothing: the plugin makes each file it uploads readable by anyone.
+   - Cloudflare R2 has no address until you turn one on: in the bucket's settings, turn on its `r2.dev` address or connect a domain, and copy the address it shows into **Public address**.
+
+   **Use an address of my own** is for files shown from somewhere else, such as a domain of your own or a service that copies them closer to visitors (a CDN, such as CloudFront in front of Amazon S3). Leave it off if you're not sure.
+3. **Allow the admin panel's requests** in the bucket's CORS settings. The plugin's frame is sandboxed, so its requests come from no origin of their own, and the rule has to allow any (the screen has this to copy, under *Let the admin panel upload to the bucket*):
 
    ```json
    [
@@ -73,8 +94,8 @@ plugins: [s3({ connect: ["https://minio.example.org"] })],
    }
    ```
 
-5. **Add the keys to the site's secrets** as `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY`: on GitHub under the repository's **Settings → Secrets and variables → Actions**; on GitLab under **Settings → CI/CD → Variables**, masked (and protected, since tasks run on the main branch). The plugin's task gets only these two; nothing else in the site's CI does unless it asks for them.
-6. In the admin panel, open **Site Settings → S3 storage**, fill in the service's address (such as `https://s3.eu-west-1.amazonaws.com`, or `https://<account id>.r2.cloudflarestorage.com` for R2), the bucket, its region (`auto` for R2), an optional folder and the public address, and save. New uploads go to the bucket from then on. **Try the bucket** puts a small file and removes it, which checks the settings, the keys and the CORS settings together.
+5. **Add the keys to the site's secrets** as `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY`. The screen shows only the steps for this site, with a link to the page where they're added: on GitHub, the repository's **Settings → Secrets and variables → Actions → New repository secret**; on GitLab, **Settings → CI/CD → Variables**, masked and protected, since tasks run on the main branch; on a full-stack site, the server's environment; in `goodfellow dev` and `next dev`, the site's `.env.local` (see below). The plugin's task gets only these two; nothing else in the site's CI does unless it asks for them.
+6. **Save** the settings. New uploads go to the bucket from then on. **Try the bucket** puts a small file and removes it, which checks the settings, the keys and the CORS settings together.
 7. On the **Media** screen, **Move … files to S3 storage** moves the files the site already has.
 
 ## Full-stack sites
@@ -95,10 +116,12 @@ It reads the bucket's settings from the server's copy of the site's files, so a 
 
 ## Trying it out locally
 
-`goodfellow dev` and `next dev` run plugins' tasks on your computer, with the development server's environment as their secrets, so start it with the keys set:
+`goodfellow dev` and `next dev` run plugins' tasks on your computer. They read the secrets from the site's `.env.local` each time, which the starters' `.gitignore` keeps out of the site's files:
 
 ```sh
-S3_ACCESS_KEY_ID=… S3_SECRET_ACCESS_KEY=… npm run dev
+# .env.local
+S3_ACCESS_KEY_ID=…
+S3_SECRET_ACCESS_KEY=…
 ```
 
 ## Removing it

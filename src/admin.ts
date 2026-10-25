@@ -7,12 +7,12 @@
  * and the frame sends files to the bucket at the signed addresses.
  */
 import { isSignedRequests, StorageError, sendSigned } from "./client.js";
+import { isAnswer, type StorageService, servicesFrom } from "./services.js";
 import {
   MEDIA_STORAGE_FILE,
   parseSettings,
   parseStoredMedia,
   SETTINGS_FILE,
-  type SettingsProblem,
   type StorageSettings,
   type StoredMediaFile,
   settingsProblems,
@@ -58,7 +58,7 @@ async function notReady(api: PluginAdminApi): Promise<Exclude<PluginMediaReady, 
   if (!reachable(settings.endpoint, api.plugin.permissions.connect)) {
     return {
       ready: false,
-      message: `The admin panel can't reach ${settings.endpoint}: a developer needs to add it to the plugin's addresses in the site's config.`,
+      message: `The admin panel can't reach ${settings.endpoint}: a developer needs to add the service back to the plugin's services in the site's config.`,
       screen: "settings",
     };
   }
@@ -151,55 +151,107 @@ export async function checkBucket(api: PluginAdminApi, fetcher: typeof fetch = f
   await sendSigned(remove, "remove the test file", undefined, fetcher);
 }
 
-const FIELD_LABELS: Record<SettingsProblem, string> = {
-  endpoint: "The service's address should start with https://, such as https://s3.eu-west-1.amazonaws.com.",
-  bucket: "Bucket names are 3 to 63 lowercase letters, digits, dots and dashes.",
-  region: "Regions are lowercase letters, digits and dashes, such as eu-west-1, or auto for Cloudflare R2.",
-  folder: "A folder is names separated by slashes, ending in one, such as media/.",
-  publicUrl: "The public address should start with https://, with no ? or #.",
-};
+/** The CORS rules buckets need, for the plugin's frame, which has no origin of its own. */
+const CORS_RULES = `[
+  {
+    "AllowedOrigins": ["*"],
+    "AllowedMethods": ["PUT", "DELETE", "GET"],
+    "AllowedHeaders": ["*"],
+    "MaxAgeSeconds": 3600
+  }
+]`;
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** What's chosen on the screen, as settings, or what's wrong with it, in words for the owner. */
+export function chosenSettings(
+  service: StorageService | undefined,
+  form: { location: string; bucket: string; folder: string; ownAddress: boolean; publicUrl: string },
+): StorageSettings | string {
+  if (!service) return "Choose the service the bucket is in.";
+  const location = form.location.trim();
+  if (service.asks && !isAnswer(service.asks, location)) {
+    return `${service.asks.label} should look like ${service.asks.example}. ${service.asks.hint}`;
+  }
+  const bucket = form.bucket.trim();
+  const own = form.ownAddress || !service.publicUrl;
+  const settings = tidySettings({
+    service: service.id,
+    location,
+    ownAddress: own,
+    publicRead: service.publicRead === true,
+    endpoint: service.endpoint(location),
+    bucket,
+    region: service.signingRegion(location),
+    folder: form.folder,
+    publicUrl: own || !service.publicUrl ? form.publicUrl : service.publicUrl(bucket, location),
+  });
+  const problems = settingsProblems(settings);
+  if (problems.includes("bucket")) return "Bucket names are 3 to 63 lowercase letters, digits, dots and dashes.";
+  if (problems.includes("folder")) return "A folder is names separated by slashes, ending in one, such as media/.";
+  if (problems.includes("publicUrl")) {
+    return own
+      ? "The public address should start with https://, such as https://media.example.org."
+      : "The bucket's own address couldn't be worked out: give an address of your own.";
+  }
+  if (problems.length > 0) return "Those settings can't be used: check the service's details.";
+  // The bucket's own address, with the folder files go in.
+  return own || !settings.folder
+    ? settings
+    : { ...settings, publicUrl: `${settings.publicUrl}/${settings.folder.replace(/\/$/, "")}` };
 }
 
 /** The settings screen: where files are kept, which publishes for the whole site, and where the keys go. */
 async function settingsScreen(element: { ownerDocument: unknown }, api: PluginAdminApi) {
   const root = element as HTMLElement;
   const doc = root.ownerDocument;
+  const services = servicesFrom(api.plugin.options);
   const site = await loadSite(api);
+  const saved = site.settings;
+  const inUse = site.stored?.plugin === api.plugin.name;
 
-  const create = <K extends keyof HTMLElementTagNameMap>(tag: K, text?: string): HTMLElementTagNameMap[K] => {
+  const h = <K extends keyof HTMLElementTagNameMap>(
+    tag: K,
+    props: Partial<Record<"text" | "id" | "className", string>> = {},
+    ...children: (Node | string)[]
+  ): HTMLElementTagNameMap[K] => {
     const node = doc.createElement(tag);
-    if (text !== undefined) node.textContent = text;
+    if (props.text !== undefined) node.textContent = props.text;
+    if (props.id) node.id = props.id;
+    if (props.className) node.className = props.className;
+    node.append(...children);
     return node;
   };
-  const field = (id: string, label: string, value: string, hint?: string, type = "text") => {
-    const wrapper = create("p");
-    const labelNode = create("label", label);
+  const labelled = (id: string, label: string, control: HTMLElement, hint?: HTMLElement | string) => {
+    const wrapper = h("p");
+    const labelNode = h("label", { text: label });
     labelNode.htmlFor = id;
-    const input = create("input");
-    input.id = id;
-    input.type = type;
-    input.value = value;
-    input.autocomplete = "off";
-    input.spellcheck = false;
-    wrapper.append(labelNode, create("br"), input);
+    control.id = id;
+    wrapper.append(labelNode, control);
     if (hint) {
-      const hintNode = create("small", hint);
+      const hintNode = typeof hint === "string" ? h("small", { text: hint }) : hint;
       hintNode.id = `${id}-hint`;
-      input.setAttribute("aria-describedby", hintNode.id);
-      wrapper.append(create("br"), hintNode);
+      control.setAttribute("aria-describedby", hintNode.id);
+      wrapper.append(hintNode);
     }
-    return { wrapper, input };
+    return wrapper;
+  };
+  const input = (value = "") => {
+    const node = h("input");
+    node.value = value;
+    node.autocomplete = "off";
+    node.spellcheck = false;
+    return node;
   };
   const button = (text: string) => {
-    const node = create("button", text);
+    const node = h("button", { text });
     node.type = "button";
     return node;
   };
   const status = () => {
-    const node = create("p");
+    const node = h("p");
     node.setAttribute("role", "status");
     return node;
   };
@@ -222,58 +274,103 @@ async function settingsScreen(element: { ownerDocument: unknown }, api: PluginAd
     });
   };
 
-  const settings = site.settings;
-  const inUse = site.stored?.plugin === api.plugin.name;
-
-  const heading = create("h1", api.plugin.title);
-  const intro = create(
-    "p",
-    "Keeps the site's media in a bucket of an S3-compatible service, such as Amazon S3, Cloudflare R2 or Backblaze B2, instead of the site's own files, so large files such as long videos can be uploaded. Pages show the files from the bucket's public address, at the same /media/ addresses as before.",
-  );
+  const heading = h("h1", { text: api.plugin.title });
+  const intro = h("p", {
+    text: "Keeps the site's media in a storage service instead of the site's own files, so large files such as long videos can be uploaded. Pages show each file from the storage, at the same address as before.",
+  });
 
   // Where files are kept, for the whole site.
-  const where = create("section");
-  const whereHeading = create("h2", "Where files are kept");
-  const endpoint = field(
-    "endpoint",
-    "Service address",
-    settings?.endpoint ?? "",
-    "Such as https://s3.eu-west-1.amazonaws.com, or https://<account id>.r2.cloudflarestorage.com for Cloudflare R2.",
-  );
-  const bucket = field("bucket", "Bucket", settings?.bucket ?? "");
-  const region = field("region", "Region", settings?.region ?? "auto", "Such as eu-west-1, or auto for Cloudflare R2.");
-  const folder = field(
-    "folder",
-    "Folder in the bucket (optional)",
-    settings?.folder ?? "",
-    "Such as media/, for a bucket shared with other things.",
-  );
-  const publicUrl = field(
-    "public-url",
-    "Public address",
-    settings?.publicUrl ?? "",
-    "Where visitors' browsers get the files, the folder included, such as https://media.example.org.",
-  );
+  const serviceSelect = h("select");
+  serviceSelect.append(h("option", { text: "Choose a service" }));
+  (serviceSelect.firstChild as HTMLOptionElement).value = "";
+  for (const service of services) {
+    const option = h("option", { text: service.name });
+    option.value = service.id;
+    serviceSelect.append(option);
+  }
+  serviceSelect.value = saved && services.some((service) => service.id === saved.service) ? saved.service : "";
+  const location = input(saved?.location ?? "");
+  const locationField = h("div");
+  const bucket = input(saved?.bucket ?? "");
+  const bucketHint = h("small");
+  const ownAddress = h("input");
+  ownAddress.type = "checkbox";
+  ownAddress.checked = saved?.ownAddress === true;
+  const publicUrl = input(saved?.ownAddress ? saved.publicUrl : "");
+  const publicField = h("div");
+  const folder = input(saved?.folder ?? "");
+
+  const chosen = () => services.find((service) => service.id === serviceSelect.value);
+  /** Shows only what the chosen service needs, with its own words for each. */
+  const showService = () => {
+    const service = chosen();
+    locationField.replaceChildren();
+    publicField.replaceChildren();
+    bucketHint.textContent = service ? `The bucket's name, as you created it in ${service.name}.` : "";
+    if (!service) return;
+    if (service.asks) {
+      location.placeholder = service.asks.example;
+      locationField.append(labelled("location", service.asks.label, location, service.asks.hint));
+    }
+    const own = h("p");
+    const ownLabel = h("label", { text: "Use an address of my own" });
+    ownLabel.htmlFor = "own-address";
+    ownAddress.id = "own-address";
+    ownLabel.prepend(ownAddress);
+    own.append(
+      ownLabel,
+      h("small", {
+        text: " Only if the files are shown from somewhere else, such as a domain of your own connected to the bucket. Leave this off if you're not sure.",
+        className: "gfa-hint",
+      }),
+    );
+    const address = labelled(
+      "public-url",
+      "Public address",
+      publicUrl,
+      service.publicUrl
+        ? `Where visitors' browsers get the files instead, such as https://media.example.org, once it's connected to the bucket in ${service.name}.`
+        : service.publicHelp,
+    );
+    publicUrl.placeholder = "https://";
+    if (service.publicUrl) {
+      const shown = service.publicUrl(
+        bucket.value.trim() || "<bucket>",
+        location.value.trim() || service.asks?.example || "",
+      );
+      publicField.append(
+        h("p", {
+          text: `Visitors' browsers get the files from the bucket's own address, ${shown}, once the bucket lets anyone read them. ${service.publicHelp}`,
+          className: "gfa-hint",
+        }),
+        own,
+      );
+      if (ownAddress.checked) publicField.append(address);
+    } else {
+      publicField.append(address);
+    }
+  };
+  serviceSelect.addEventListener("change", () => {
+    // A region from one service means nothing to another: start again, or with what's saved for this one.
+    location.value = saved && saved.service === serviceSelect.value ? saved.location : "";
+    showService();
+    showKeys();
+  });
+  ownAddress.addEventListener("change", showService);
+  bucket.addEventListener("change", showService);
+  location.addEventListener("change", showService);
+
   const save = button(inUse ? "Save" : "Save and keep the site's media here");
   const saveStatus = status();
-  const using = create(
-    "p",
-    inUse
-      ? "The site keeps its media here. Files already in the site's own files can be moved here from the Media screen."
-      : "Once saved, new uploads go to the bucket. Files already in the site's own files can then be moved there from the Media screen.",
-  );
-  const openMedia = button("Open the Media screen");
-  openMedia.addEventListener("click", () => api.navigate("#/media"));
   run(save, saveStatus, async () => {
-    const next = tidySettings({
-      endpoint: endpoint.input.value,
-      bucket: bucket.input.value,
-      region: region.input.value,
-      folder: folder.input.value,
-      publicUrl: publicUrl.input.value,
+    const next = chosenSettings(chosen(), {
+      location: location.value,
+      bucket: bucket.value,
+      folder: folder.value,
+      ownAddress: ownAddress.checked,
+      publicUrl: publicUrl.value,
     });
-    const problems = settingsProblems(next);
-    if (problems.length > 0) return problems.map((problem) => FIELD_LABELS[problem]).join(" ");
+    if (typeof next === "string") return next;
     const { stored } = await loadSite(api);
     if (stored && stored.plugin !== api.plugin.name && Object.keys(stored.files).length > 0) {
       return "Another plugin keeps the site's media. Move it back to the site from the Media screen first.";
@@ -296,26 +393,92 @@ async function settingsScreen(element: { ownerDocument: unknown }, api: PluginAd
     );
     return published ? "Saved. New uploads go to the bucket." : "Not saved.";
   });
-  where.append(
-    whereHeading,
-    endpoint.wrapper,
-    bucket.wrapper,
-    region.wrapper,
-    folder.wrapper,
-    publicUrl.wrapper,
+  const more = h("details", {}, h("summary", { text: "More options" }));
+  more.append(
+    labelled(
+      "folder",
+      "Folder in the bucket (optional)",
+      folder,
+      "Such as media/, for a bucket shared with other things.",
+    ),
+  );
+  more.open = Boolean(saved?.folder);
+  const openMedia = button("Open the Media screen");
+  openMedia.addEventListener("click", () => api.navigate("#/media"));
+  const where = h(
+    "section",
+    {},
+    h("h2", { text: "Where files are kept" }),
+    labelled("service", "Storage service", serviceSelect),
+    locationField,
+    labelled("bucket", "Bucket", bucket, bucketHint),
+    publicField,
+    more,
     save,
     saveStatus,
-    using,
+    h("p", {
+      text: inUse
+        ? "The site keeps its media here. Files already in the site's own files can be moved here from the Media screen."
+        : "Once saved, new uploads go to the bucket. Files already in the site's own files can then be moved there from the Media screen.",
+    }),
     openMedia,
   );
 
-  // The keys, which stay with the site's CI or server.
-  const keys = create("section");
-  const keysHeading = create("h2", "The bucket's keys");
-  const keysIntro = create(
-    "p",
-    `The keys never go into the admin panel. A developer adds them to the site's secrets as ${KEY_ID_SECRET} and ${SECRET_KEY_SECRET}: on GitHub under the repository's Settings → Secrets and variables → Actions, or on GitLab under Settings → CI/CD → Variables, masked. Each upload is then signed by the site's build service, which takes about a minute. On a site with a server of its own, they can go in the server's environment instead, which signs uploads straight away. Use keys that can only put and delete files in this bucket.`,
-  );
+  // The keys, which stay with the site's build service or server, and how to add them for this site.
+  const keysBody = h("div");
+  const helps = await api.secretsHelp().catch(() => []);
+  const showKeys = () => {
+    const service = chosen();
+    keysBody.replaceChildren();
+    keysBody.append(
+      h("p", {
+        text: `The bucket's keys never go into the admin panel: the site keeps them as ${KEY_ID_SECRET} and ${SECRET_KEY_SECRET}, and signs each upload with them.`,
+      }),
+    );
+    if (service) {
+      keysBody.append(
+        h("h3", { text: `1. Make the keys in ${service.name}` }),
+        h("p", { text: `${service.keysHelp} Use keys that can only put and delete files in this bucket.` }),
+      );
+    }
+    if (helps.length === 0) {
+      keysBody.append(
+        h("p", {
+          text: "This site's setup can't run plugins' tasks yet, so there's nowhere to add them. A developer needs to copy the starter's plugin-task setup into the site first.",
+        }),
+      );
+      return;
+    }
+    helps.forEach((help, index) => {
+      const number = service ? `${index + 2}. ` : "";
+      const lead = index > 0 ? "Or: " : "";
+      keysBody.append(h("h3", { text: `${number}${lead}${help.title}` }));
+      const steps = h("ol");
+      for (const step of help.steps) {
+        const item = h("li", { text: step.text });
+        if (step.code) item.append(h("pre", {}, h("code", { text: step.code })));
+        steps.append(item);
+      }
+      keysBody.append(steps);
+      if (help.link) {
+        const link = h("a", { text: help.link.label });
+        const url = help.link.url;
+        link.href = url;
+        link.addEventListener("click", (event) => {
+          event.preventDefault();
+          api.openSecretsLink(url);
+        });
+        keysBody.append(h("p", {}, link));
+      }
+      for (const note of help.notes) keysBody.append(h("small", { text: note }));
+    });
+  };
+  const cors = h("details", {}, h("summary", { text: "Let the admin panel upload to the bucket" }));
+  const corsText = h("p");
+  cors.append(corsText, h("pre", {}, h("code", { text: CORS_RULES })));
+  cors.addEventListener("toggle", () => {
+    corsText.textContent = chosen()?.corsHelp ?? "The bucket's CORS settings need to allow uploads from any origin:";
+  });
   const check = button("Try the bucket");
   const checkStatus = status();
   run(check, checkStatus, async () => {
@@ -323,8 +486,21 @@ async function settingsScreen(element: { ownerDocument: unknown }, api: PluginAd
     await checkBucket(api);
     return "The bucket took a test file and removed it again: uploads will work.";
   });
-  keys.append(keysHeading, keysIntro, check, checkStatus);
+  const keys = h(
+    "section",
+    {},
+    h("h2", { text: "The bucket's keys" }),
+    keysBody,
+    cors,
+    h("p", {
+      text: "Once the keys are added and the settings saved, try the bucket: it puts a small file there and removes it again.",
+    }),
+    check,
+    checkStatus,
+  );
 
+  showService();
+  showKeys();
   root.append(heading, intro, where, keys);
 }
 

@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 import { credentialsFrom, MAX_SIGNED, type SignedRequest, signInput, signRequests } from "../src/signing.js";
 
 const settings = {
+  service: "r2",
+  location: "0123456789abcdef0123456789abcdef",
+  ownAddress: true,
+  publicRead: false,
   endpoint: "https://s3.eu-west-1.amazonaws.com",
   bucket: "parish-media",
   region: "eu-west-1",
@@ -28,6 +32,18 @@ describe("signing", () => {
     expect(url.searchParams.get("X-Amz-Expires")).toBe("3600");
     expect(url.searchParams.get("X-Amz-SignedHeaders")).toBe("content-type;host");
     expect((put as SignedRequest).url).not.toContain("SECRET");
+  });
+
+  it("has each upload say anyone may read it, where the service needs that", async () => {
+    const [put] = await signRequests(
+      { action: "upload", files: [{ address: "/media/a.jpg", type: "image/jpeg" }] },
+      { ...settings, publicRead: true },
+      credentials,
+    );
+    expect((put as SignedRequest).headers).toEqual({ "content-type": "image/jpeg", "x-amz-acl": "public-read" });
+    expect(new URL((put as SignedRequest).url).searchParams.get("X-Amz-SignedHeaders")).toBe(
+      "content-type;host;x-amz-acl",
+    );
   });
 
   it("signs nothing it wasn't made for", async () => {

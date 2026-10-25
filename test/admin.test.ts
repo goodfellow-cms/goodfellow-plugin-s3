@@ -2,14 +2,19 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import admin, { checkBucket, reachable, signed } from "../src/admin.js";
-import plugin, { KNOWN_SERVICES } from "../src/index.js";
+import admin, { checkBucket, chosenSettings, reachable, signed } from "../src/admin.js";
+import plugin, { SERVICES, s3 } from "../src/index.js";
+import { servicesFrom } from "../src/services.js";
 import { MEDIA_STORAGE_FILE, SETTINGS_FILE, settingsText } from "../src/settings.js";
 import sign from "../src/sign.js";
 import type { PluginAdminApi } from "../src/types.js";
 import { fakeS3 } from "./fake-s3.js";
 
 const settings = {
+  service: "r2",
+  location: "0123456789abcdef0123456789abcdef",
+  ownAddress: true,
+  publicRead: false,
   endpoint: "https://account.r2.cloudflarestorage.com",
   bucket: "parish-media",
   region: "auto",
@@ -47,6 +52,8 @@ async function fakeApi(
       if (!options.server) throw new Error("S3 storage has no server here.");
       return options.server(init?.body ?? "");
     },
+    secretsHelp: async () => [],
+    openSecretsLink: () => {},
     task: async (id, input) => {
       expect(id).toBe("sign");
       tasks.push(input);
@@ -147,11 +154,76 @@ describe("media storage in the admin panel", () => {
   });
 
   it("reaches only the services its permissions name", () => {
-    expect(reachable("https://account.r2.cloudflarestorage.com", KNOWN_SERVICES)).toBe(true);
-    expect(reachable("https://s3.eu-west-1.amazonaws.com", KNOWN_SERVICES)).toBe(true);
-    expect(reachable("https://storage.googleapis.com", KNOWN_SERVICES)).toBe(true);
-    expect(reachable("https://amazonaws.com.evil.example", KNOWN_SERVICES)).toBe(false);
-    expect(reachable("http://account.r2.cloudflarestorage.com", KNOWN_SERVICES)).toBe(false);
+    const connect = plugin.permissions?.connect ?? [];
+    expect(reachable("https://account.r2.cloudflarestorage.com", connect)).toBe(true);
+    expect(reachable("https://s3.eu-west-1.amazonaws.com", connect)).toBe(true);
+    expect(reachable("https://storage.googleapis.com", connect)).toBe(true);
+    expect(reachable("https://amazonaws.com.evil.example", connect)).toBe(false);
+    expect(reachable("http://account.r2.cloudflarestorage.com", connect)).toBe(false);
+  });
+});
+
+describe("choosing where files are kept", () => {
+  const service = (id: string) => SERVICES.find((candidate) => candidate.id === id);
+  const form = { location: "", bucket: "parish-media", folder: "", ownAddress: false, publicUrl: "" };
+
+  it("works out a service's address and the bucket's own public address from its region", () => {
+    expect(chosenSettings(service("aws"), { ...form, location: "eu-west-1" })).toMatchObject({
+      service: "aws",
+      endpoint: "https://s3.eu-west-1.amazonaws.com",
+      region: "eu-west-1",
+      publicUrl: "https://parish-media.s3.eu-west-1.amazonaws.com",
+      ownAddress: false,
+    });
+    // Files in a folder are public under it.
+    expect(chosenSettings(service("b2"), { ...form, location: "us-west-004", folder: "site" })).toMatchObject({
+      endpoint: "https://s3.us-west-004.backblazeb2.com",
+      publicUrl: "https://s3.us-west-004.backblazeb2.com/parish-media/site",
+    });
+    // Spaces makes each upload readable, since it has no bucket-wide setting.
+    expect(chosenSettings(service("spaces"), { ...form, location: "nyc3" })).toMatchObject({ publicRead: true });
+  });
+
+  it("asks for the address R2 shows, and an account ID that looks like one", () => {
+    const r2 = service("r2");
+    expect(chosenSettings(r2, { ...form, location: "nope" })).toMatch(/Account ID should look like/);
+    expect(chosenSettings(r2, { ...form, location: "0123456789abcdef0123456789abcdef" })).toMatch(/public address/);
+    expect(
+      chosenSettings(r2, {
+        ...form,
+        location: "0123456789abcdef0123456789abcdef",
+        publicUrl: "https://pub-1234.r2.dev",
+      }),
+    ).toMatchObject({
+      endpoint: "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com",
+      region: "auto",
+      publicUrl: "https://pub-1234.r2.dev",
+      ownAddress: true,
+    });
+    expect(chosenSettings(undefined, form)).toMatch(/Choose the service/);
+  });
+
+  it("offers services a site's config adds, and lets its screen reach them", () => {
+    const options = {
+      services: [
+        {
+          id: "minio",
+          name: "Our MinIO",
+          endpoint: "https://minio.example.org/",
+          publicUrl: "https://media.example.org/{bucket}",
+        },
+      ],
+    };
+    const minio = servicesFrom(options).find((candidate) => candidate.id === "custom:minio");
+    expect(chosenSettings(minio, form)).toMatchObject({
+      endpoint: "https://minio.example.org",
+      region: "us-east-1",
+      publicUrl: "https://media.example.org/parish-media",
+    });
+    const configured = s3(options);
+    expect(configured.permissions?.connect).toContain("https://minio.example.org");
+    expect(configured.options).toEqual(options);
+    expect(servicesFrom({ services: [{ id: "broken" }] })).toHaveLength(SERVICES.length);
   });
 });
 

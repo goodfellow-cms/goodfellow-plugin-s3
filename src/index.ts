@@ -6,35 +6,29 @@
  * stay in the site's CI secrets, or a full-stack site's server, which sign
  * each upload; the browser sends files straight to the bucket.
  */
+
+import { type CustomService, servicesFrom } from "./services.js";
 import { MEDIA_STORAGE_FILE, SETTINGS_FILE } from "./settings.js";
 import { KEY_ID_SECRET, SECRET_KEY_SECRET } from "./signing.js";
 import type { GoodfellowPlugin } from "./types.js";
 
-/** Services the admin panel can send files to without the site naming them: the S3-compatible ones most sites use. */
-export const KNOWN_SERVICES = [
-  "https://*.amazonaws.com",
-  "https://*.r2.cloudflarestorage.com",
-  "https://*.backblazeb2.com",
-  "https://*.digitaloceanspaces.com",
-  "https://*.wasabisys.com",
-  "https://*.linodeobjects.com",
-  "https://storage.googleapis.com",
-];
+export { type CustomService, SERVICES, type StorageService } from "./services.js";
+
+export interface S3Options {
+  /**
+   * More services to offer, such as a MinIO server of the site's own:
+   * `{ id, name, endpoint, region?, publicUrl? }`, with `{bucket}` in
+   * `publicUrl` for the bucket's name.
+   */
+  services?: CustomService[];
+}
 
 /** S3 takes files up to 5 GB in one upload, which is as large as the admin panel sends. */
 export const MAX_BYTES = 5 * 1024 * 1024 * 1024;
 
-export interface S3Options {
-  /**
-   * More services' addresses, as origins, such as a MinIO server's
-   * `https://minio.example.org`, for a site that lists the plugin in its own
-   * config rather than installing it from the admin panel.
-   */
-  connect?: string[];
-}
-
-/** The plugin, reaching the services in `KNOWN_SERVICES` and any more given. */
+/** The plugin, offering the services in `SERVICES` and any more given. */
 export function s3(options: S3Options = {}): GoodfellowPlugin {
+  const services = servicesFrom(options);
   return {
     name: "goodfellow-plugin-s3",
     title: "S3 storage",
@@ -42,7 +36,8 @@ export function s3(options: S3Options = {}): GoodfellowPlugin {
     description:
       "Keeps the site's media in any S3-compatible storage, such as Amazon S3, Cloudflare R2 or Backblaze B2.",
     permissions: {
-      connect: [...KNOWN_SERVICES, ...(options.connect ?? [])],
+      // Its screen sends files to the services it offers, and nowhere else.
+      connect: [...new Set(services.flatMap((service) => service.connect))],
       files: [SETTINGS_FILE, MEDIA_STORAGE_FILE],
       secrets: [KEY_ID_SECRET, SECRET_KEY_SECRET],
       read: [SETTINGS_FILE],
@@ -52,6 +47,7 @@ export function s3(options: S3Options = {}): GoodfellowPlugin {
     tasks: [{ id: "sign", module: "goodfellow-plugin-s3/sign", title: "Sign uploads to the bucket" }],
     server: "goodfellow-plugin-s3/server",
     mediaStorage: { maxBytes: MAX_BYTES },
+    ...(options.services?.length && { options: { services: options.services } }),
   };
 }
 

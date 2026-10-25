@@ -10,6 +10,13 @@ export const SETTINGS_FILE = "content/s3-storage.json";
 export const MEDIA_STORAGE_FILE = "content/media-storage.json";
 
 export interface StorageSettings {
+  /** Which service it is (`services.ts`), and what was given to find the bucket there, such as its region. */
+  service: string;
+  location: string;
+  /** Whether the public address is one the owner gave, rather than the bucket's own. */
+  ownAddress: boolean;
+  /** Whether each upload says anyone may read it, for services without bucket-wide settings. */
+  publicRead: boolean;
   /** The S3 service's address, such as `https://s3.eu-west-1.amazonaws.com` or `https://<account>.r2.cloudflarestorage.com`. */
   endpoint: string;
   bucket: string;
@@ -63,6 +70,10 @@ export function settingsProblems(settings: StorageSettings): SettingsProblem[] {
 export function tidySettings(settings: StorageSettings): StorageSettings {
   const folder = settings.folder.trim().replace(/^\/+/, "");
   return {
+    service: settings.service,
+    location: settings.location.trim(),
+    ownAddress: settings.ownAddress,
+    publicRead: settings.publicRead,
     endpoint: settings.endpoint.trim().replace(/\/+$/, ""),
     bucket: settings.bucket.trim(),
     region: settings.region.trim() || "auto",
@@ -78,6 +89,10 @@ export function parseSettings(text: string | null | undefined): StorageSettings 
     const file = JSON.parse(text) as Partial<StorageSettings> & { version?: number };
     if (file.version !== 1) return undefined;
     const settings = tidySettings({
+      service: String(file.service ?? ""),
+      location: String(file.location ?? ""),
+      ownAddress: file.ownAddress === true,
+      publicRead: file.publicRead === true,
       endpoint: String(file.endpoint ?? ""),
       bucket: String(file.bucket ?? ""),
       region: String(file.region ?? ""),
@@ -92,8 +107,9 @@ export function parseSettings(text: string | null | undefined): StorageSettings 
 
 /** The settings file's text, with a trailing newline, as Goodfellow writes content. */
 export function settingsText(settings: StorageSettings): string {
-  const { endpoint, bucket, region, folder, publicUrl } = settings;
-  return `${JSON.stringify({ version: 1, endpoint, bucket, region, folder, publicUrl }, null, 2)}\n`;
+  const { service, location, endpoint, bucket, region, folder, publicUrl, ownAddress, publicRead } = settings;
+  const file = { version: 1, service, location, endpoint, bucket, region, folder, publicUrl, ownAddress, publicRead };
+  return `${JSON.stringify(file, null, 2)}\n`;
 }
 
 /** Goodfellow's list of stored media from its text, or `undefined`. */

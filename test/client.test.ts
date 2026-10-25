@@ -5,6 +5,10 @@ import { type SignedRequest, signRequests } from "../src/signing.js";
 import { fakeS3 } from "./fake-s3.js";
 
 const settings: StorageSettings = {
+  service: "r2",
+  location: "0123456789abcdef0123456789abcdef",
+  ownAddress: true,
+  publicRead: false,
   endpoint: "https://account.r2.cloudflarestorage.com",
   bucket: "parish-media",
   region: "auto",

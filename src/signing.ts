@@ -106,10 +106,12 @@ export async function signRequests(
       asked.addresses.map(async (address) => ({ ...(await sign("DELETE", objectKey(settings, address))), address })),
     );
   }
-  // The type's signed too, so the file is served as what it is.
+  // The type's signed too, so the file is served as what it is, and on services without bucket-wide
+  // settings, that anyone may read it.
+  const readable: Record<string, string> = settings.publicRead ? { "x-amz-acl": "public-read" } : {};
   return Promise.all(
     asked.files.map(async ({ address, type }) => ({
-      ...(await sign("PUT", objectKey(settings, address), { "content-type": type })),
+      ...(await sign("PUT", objectKey(settings, address), { "content-type": type, ...readable })),
       address,
     })),
   );
