@@ -68,7 +68,7 @@ export interface PluginAdminApi {
 
 /** How to add the secrets the plugin declared, for this site, in the admin panel's words. */
 export interface PluginSecretsHelp {
-  where: "development" | "server" | "github" | "gitlab";
+  where: "development" | "server" | "github" | "gitlab" | "bitbucket";
   title: string;
   link?: { url: string; label: string };
   steps: { text: string; code?: string }[];

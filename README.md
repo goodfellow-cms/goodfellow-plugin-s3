@@ -4,11 +4,11 @@ S3 storage for [Goodfellow](https://github.com/goodfellow-cms/goodfellow-cms) si
 
 Content still refers to files as `/media/…`, so pages don't change when the site's media moves. Goodfellow lists the files the bucket keeps in `content/media-storage.json`, and builds show them from the bucket's public address.
 
-It needs Goodfellow 0.6 or later, with the starters' setup for plugins' tasks: `.github/workflows/plugin-task.yml` on GitHub, or the `plugin-task` job in `.gitlab-ci.yml` on GitLab. Sites made before 0.6 copy them from the starter.
+It needs Goodfellow 0.6 or later, with the starters' setup for plugins' tasks: `.github/workflows/plugin-task.yml` on GitHub, the `plugin-task` job in `.gitlab-ci.yml` on GitLab, or the `plugin-task` pipeline in `bitbucket-pipelines.yml` on Bitbucket, which `create-goodfellow` writes for sites stored there. Sites made before 0.6 copy them from the starter.
 
 ## How it works
 
-- **Keys:** the bucket's keys are kept in the site's CI secrets, `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY` (GitHub Actions secrets, or GitLab CI/CD variables), never in the admin panel, an editor's browser or the site's files.
+- **Keys:** the bucket's keys are kept in the site's CI secrets, `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY` (GitHub Actions secrets, GitLab CI/CD variables or Bitbucket's secured Pipelines variables), never in the admin panel, an editor's browser or the site's files.
 - **Uploading:** the admin panel's Media screen hands each batch of files to the plugin, which runs in a sandboxed frame of its own. The plugin asks the site's CI to sign the uploads, with its `sign` task, which gets only those two secrets and takes about a minute. The task answers with an address for each file that works for an hour and only for putting that file, sealed so only that admin panel can read it, and the frame sends the files straight to the bucket. Then the admin panel publishes the list of files.
 - **Full-stack sites** can keep the keys in their server's environment instead, which signs uploads straight away (see below).
 - **Moving the site's media:** once the plugin is set up, the Media screen offers to move the files already in the site's own files to the bucket, and to move them back (files up to 25 MB), in one publish each.
@@ -94,7 +94,7 @@ The plugin's screen, **Site Settings → S3 storage**, walks through these steps
    }
    ```
 
-5. **Add the keys to the site's secrets** as `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY`. The screen shows only the steps for this site, with a link to the page where they're added: on GitHub, the repository's **Settings → Secrets and variables → Actions → New repository secret**; on GitLab, **Settings → CI/CD → Variables**, masked and protected, since tasks run on the main branch; on a full-stack site, the server's environment; in `goodfellow dev` and `next dev`, the site's `.env.local` (see below). The plugin's task gets only these two; nothing else in the site's CI does unless it asks for them.
+5. **Add the keys to the site's secrets** as `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY`. The screen shows only the steps for this site, with a link to the page where they're added: on GitHub, the repository's **Settings → Secrets and variables → Actions → New repository secret**; on GitLab, **Settings → CI/CD → Variables**, masked and protected, since tasks run on the main branch; on Bitbucket, **Repository settings → Pipelines → Repository variables**, secured, with Pipelines turned on; on a full-stack site, the server's environment; in `goodfellow dev` and `next dev`, the site's `.env.local` (see below). The plugin's task gets only these two. On GitHub nothing else in the site's CI gets them; GitLab and Bitbucket give every job in the site's pipelines the variables, so keep only what the site needs there.
 6. **Save** the settings. New uploads go to the bucket from then on. **Try the bucket** puts a small file and removes it, which checks the settings, the keys and the CORS settings together.
 7. On the **Media** screen, **Move … files to S3 storage** moves the files the site already has.
 

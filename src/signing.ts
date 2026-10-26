@@ -7,7 +7,10 @@
 import { objectKey, objectUrl, type StorageSettings } from "./settings.js";
 import { type Credentials, presignUrl } from "./sigv4.js";
 
-/** The secrets the keys are kept in: the site's GitHub Actions secrets, GitLab CI/CD variables or server's environment. */
+/**
+ * The secrets the keys are kept in: the site's GitHub Actions secrets, GitLab
+ * CI/CD variables, Bitbucket Pipelines variables or server's environment.
+ */
 export const KEY_ID_SECRET = "S3_ACCESS_KEY_ID";
 export const SECRET_KEY_SECRET = "S3_SECRET_ACCESS_KEY";
 
