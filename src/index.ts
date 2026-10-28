@@ -32,7 +32,7 @@ export function s3(options: S3Options = {}): GoodfellowPlugin {
   return {
     name: "goodfellow-plugin-s3",
     title: "S3 storage",
-    version: "0.1.0",
+    version: "0.1.1",
     description:
       "Keeps the site's media in any S3-compatible storage, such as Amazon S3, Cloudflare R2 or Backblaze B2.",
     permissions: {
