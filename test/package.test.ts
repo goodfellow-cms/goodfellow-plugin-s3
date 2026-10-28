@@ -27,6 +27,8 @@ describe("the package", () => {
   it("is found as a Goodfellow plugin and says which releases it works with", () => {
     const pkg = read("package.json");
     expect(pkg.keywords).toContain("goodfellow-plugin");
-    expect(pkg.peerDependencies["@goodfellow-cms/core"]).toMatch(/^\^0\.\d+\.\d+$/);
+    // Every 0.x release from the one it was made for: `^0.6.0` would be 0.6 alone, and the Plugins screen offers a
+    // release only to sites on a Goodfellow release in its range.
+    expect(pkg.peerDependencies["@goodfellow-cms/core"]).toMatch(/^>=0\.\d+\.\d+ <1\.0\.0$/);
   });
 });

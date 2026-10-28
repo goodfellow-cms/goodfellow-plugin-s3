@@ -138,6 +138,10 @@ npm run build
 
 `npm run build` also writes `goodfellow-plugin.json`, what the plugin asks to do, which Goodfellow's Plugins screen shows before it's installed; commit it with any change to the plugin's permissions.
 
+Every change that reaches the published plugin needs a changeset: run `npx changeset`, choose patch, minor or major, and describe the change for the plugin's users. It writes a file in `.changeset/`, which goes in the same pull request. To release, run `npm run release:version`, which turns the changesets into a new `version` in `package.json` and an entry in `CHANGELOG.md`, and puts the same version in the plugin's description in `src/index.ts`, which a test keeps the same; commit what it changes, then publish that commit to npm.
+
+`peerDependencies` names the Goodfellow releases it works with, as a range on `@goodfellow-cms/core` (`>=0.6.0 <1.0.0`). Goodfellow's Plugins screen offers a release only to sites on a Goodfellow release in that range, so narrow it in a new version if a Goodfellow release breaks the plugin. A caret range such as `^0.6.0` would mean 0.6 alone.
+
 ## License
 
 MIT
