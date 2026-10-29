@@ -1,0 +1,2 @@
+# LF everywhere, on Windows too, which Biome and the scripts that edit files expect.
+* text=auto eol=lf
