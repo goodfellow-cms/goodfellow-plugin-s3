@@ -153,6 +153,21 @@ describe("media storage in the admin panel", () => {
     expect(tasks).toEqual([{ action: "check" }]);
   });
 
+  it("says what a full-stack site's server refused, rather than asking the CI instead", async () => {
+    const server = () => ({
+      status: 403,
+      body: JSON.stringify({
+        error: "not-allowed",
+        message: "Only the site's owners can delete files kept in S3 storage.",
+      }),
+    });
+    const { api, tasks } = await site(configured, { server });
+    await expect(signed(api, { action: "remove", addresses: ["/media/a.jpg"] })).rejects.toThrow(
+      /Only the site's owners/,
+    );
+    expect(tasks).toHaveLength(0);
+  });
+
   it("reaches only the services its permissions name", () => {
     const connect = plugin.permissions?.connect ?? [];
     expect(reachable("https://account.r2.cloudflarestorage.com", connect)).toBe(true);

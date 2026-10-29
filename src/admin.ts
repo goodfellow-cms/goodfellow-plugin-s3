@@ -84,7 +84,8 @@ export async function signed(api: PluginAdminApi, input: SignInput): Promise<Sig
       const { requests } = JSON.parse(answer.body) as { requests?: unknown };
       if (isSignedRequests(requests)) return requests;
     }
-    if (answer?.status === 400) {
+    // What the server refused, it refused: the CI isn't asked instead.
+    if (answer?.status === 400 || answer?.status === 403) {
       const { message } = JSON.parse(answer.body) as { message?: unknown };
       throw new StorageError(typeof message === "string" ? message : "The site's server didn't sign the upload.");
     }

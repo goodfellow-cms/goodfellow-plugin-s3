@@ -46,6 +46,35 @@ describe("signing", () => {
     );
   });
 
+  it("chooses each file's type by its address, whatever the browser says it is, and keeps only the media library's kinds", async () => {
+    const [jpeg, svg] = await signRequests(
+      {
+        action: "upload",
+        files: [
+          { address: "/media/choir.JPG", type: "text/html" },
+          { address: "/media/logo.svg", type: "image/svg+xml" },
+        ],
+      },
+      settings,
+      credentials,
+    );
+    expect((jpeg as SignedRequest).headers).toEqual({ "content-type": "image/jpeg" });
+    // An SVG opened on its own is downloaded, so a script in it never runs at the bucket's address.
+    expect((svg as SignedRequest).headers).toEqual({
+      "content-type": "image/svg+xml",
+      "content-disposition": "attachment",
+    });
+    expect(new URL((svg as SignedRequest).url).searchParams.get("X-Amz-SignedHeaders")).toBe(
+      "content-disposition;content-type;host",
+    );
+    for (const address of ["/media/page.html", "/media/code.js", "/media/README", "/media/.htaccess"]) {
+      await expect(
+        signRequests({ action: "upload", files: [{ address, type: "image/png" }] }, settings, credentials),
+        address,
+      ).rejects.toThrow(/isn't a kind of file/);
+    }
+  });
+
   it("signs nothing it wasn't made for", async () => {
     expect(() => signInput({ action: "list" })).toThrow();
     expect(() => signInput({ action: "upload", files: [{ address: 1 }] })).toThrow();

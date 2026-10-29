@@ -35,6 +35,48 @@ export interface SignedRequest {
   headers: Record<string, string>;
 }
 
+/**
+ * The type each kind of file the bucket keeps is served as, by its address's
+ * extension: the kinds Goodfellow's media library takes (core's
+ * `mediaKind()`), none of which runs code where it's served. The signer
+ * chooses the type rather than taking the browser's word for it, since anyone
+ * who can ask for a signature could ask for `text/html`.
+ */
+export const CONTENT_TYPES: Readonly<Record<string, string>> = {
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  png: "image/png",
+  gif: "image/gif",
+  webp: "image/webp",
+  avif: "image/avif",
+  svg: "image/svg+xml",
+  ico: "image/x-icon",
+  pdf: "application/pdf",
+  txt: "text/plain",
+  csv: "text/csv",
+  doc: "application/msword",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xls: "application/vnd.ms-excel",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ppt: "application/vnd.ms-powerpoint",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  odt: "application/vnd.oasis.opendocument.text",
+  ods: "application/vnd.oasis.opendocument.spreadsheet",
+  odp: "application/vnd.oasis.opendocument.presentation",
+  mp3: "audio/mpeg",
+  m4a: "audio/mp4",
+  mp4: "video/mp4",
+  webm: "video/webm",
+  vtt: "text/vtt",
+};
+
+/** The type a media address is kept as, by its extension, or `undefined` for a kind the bucket doesn't keep. */
+export function contentTypeOf(address: string): string | undefined {
+  const name = address.slice(address.lastIndexOf("/") + 1);
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? CONTENT_TYPES[name.slice(dot + 1).toLowerCase()] : undefined;
+}
+
 /** The address of the check's file in the bucket, which no media address can be. */
 export const CHECK_KEY = ".goodfellow-check";
 
@@ -109,13 +151,18 @@ export async function signRequests(
       asked.addresses.map(async (address) => ({ ...(await sign("DELETE", objectKey(settings, address))), address })),
     );
   }
-  // The type's signed too, so the file is served as what it is, and on services without bucket-wide
-  // settings, that anyone may read it.
+  // The type's signed too, chosen by the address, so the file is served as what its name says, and on services
+  // without bucket-wide settings, that anyone may read it.
   const readable: Record<string, string> = settings.publicRead ? { "x-amz-acl": "public-read" } : {};
   return Promise.all(
-    asked.files.map(async ({ address, type }) => ({
-      ...(await sign("PUT", objectKey(settings, address), { "content-type": type, ...readable })),
-      address,
-    })),
+    asked.files.map(async ({ address }) => {
+      const key = objectKey(settings, address);
+      const type = contentTypeOf(address);
+      if (!type) throw new Error(`${address} isn't a kind of file S3 storage keeps.`);
+      // An SVG can hold a script, which runs where it's opened on its own: it's downloaded instead, and still
+      // shows in pages' images. The admin panel cleans SVGs first, but a signed address takes whatever is sent.
+      const opened: Record<string, string> = type === "image/svg+xml" ? { "content-disposition": "attachment" } : {};
+      return { ...(await sign("PUT", key, { "content-type": type, ...opened, ...readable })), address };
+    }),
   );
 }

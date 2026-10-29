@@ -47,6 +47,19 @@ describe("the server module", () => {
     expect((await answer(ask({ action: "steal" }), { path: "sign", editor })).status).toBe(400);
   });
 
+  it("signs deletes for the site's owners only, since editors can be limited to some of the site", async () => {
+    const answer = s3Server({ root, env: { S3_ACCESS_KEY_ID: "KEY", S3_SECRET_ACCESS_KEY: "SECRET" } });
+    const remove = { action: "remove", addresses: ["/media/sermon.mp4"] };
+    const refused = await answer(ask(remove), { path: "sign", editor });
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toMatchObject({ error: "not-allowed", message: expect.stringMatching(/owners/) });
+    const owner = { login: "olive", role: "owner" as const };
+    expect((await answer(ask(remove), { path: "sign", editor: owner })).status).toBe(200);
+    // Editors still upload.
+    const upload = { action: "upload", files: [{ address: "/media/a.jpg", type: "image/jpeg" }] };
+    expect((await answer(ask(upload), { path: "sign", editor })).status).toBe(200);
+  });
+
   it("answers only signed-in editors, and leaves it to the CI without keys", async () => {
     const withKeys = s3Server({ root, env: { S3_ACCESS_KEY_ID: "KEY", S3_SECRET_ACCESS_KEY: "SECRET" } });
     expect((await withKeys(ask({ action: "check" }), { path: "sign", editor: null })).status).toBe(401);

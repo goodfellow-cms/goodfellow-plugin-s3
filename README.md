@@ -13,6 +13,7 @@ It needs Goodfellow 0.6 or later, with the starters' setup for plugins' tasks: `
 - **Full-stack sites** can keep the keys in their server's environment instead, which signs uploads straight away (see below).
 - **Moving the site's media:** once the plugin is set up, the Media screen offers to move the files already in the site's own files to the bucket, and to move them back (files up to 25 MB), in one publish each.
 - **Settings:** the service, the bucket, its region (or Cloudflare account) and the files' public address are in `content/s3-storage.json`, which holds no keys.
+- **What it signs:** only files in the site's folder of the bucket, at the media library's addresses, and only the kinds of file the media library takes (photos, documents, sound and video), each served as the type its name says, whatever the browser asks for. An SVG opened on its own is downloaded rather than shown, since an SVG can hold a script; pages show it as usual.
 
 ## Installing
 
@@ -113,6 +114,8 @@ export const { GET, POST } = goodfellowApi({
 ```
 
 It reads the bucket's settings from the server's copy of the site's files, so a change to them takes effect once the server has been rebuilt. Without the keys, the plugin signs through the CI as on any other site.
+
+The server signs uploads for every editor signed in, and deletes for the site's owners only: editors can be limited to some of the site, and the server can't see those limits, so only owners can delete files kept in the bucket.
 
 ## Trying it out locally
 
