@@ -7,6 +7,7 @@ import plugin, { SERVICES, s3 } from "../src/index.js";
 import { servicesFrom } from "../src/services.js";
 import { MEDIA_STORAGE_FILE, SETTINGS_FILE, settingsText } from "../src/settings.js";
 import sign from "../src/sign.js";
+import { MAX_SIGNED } from "../src/signing.js";
 import type { PluginAdminApi } from "../src/types.js";
 import { fakeS3 } from "./fake-s3.js";
 
@@ -123,6 +124,27 @@ describe("media storage in the admin panel", () => {
     expect(tasks).toHaveLength(2);
   });
 
+  it("signs more files than one request holds a batch at a time", async () => {
+    const s3 = fakeS3({ keys: { KEY: "SECRET" } });
+    vi.stubGlobal("fetch", s3.fetch);
+    const { api, tasks } = await site(configured);
+    const files = Array.from({ length: MAX_SIGNED + 5 }, (_, index) => ({
+      address: `/media/photo-${index}.jpg`,
+      type: "image/jpeg",
+      size: 1,
+      data: new Blob(["x"]),
+    }));
+    await media.upload(files, api);
+    expect(s3.objects.size).toBe(MAX_SIGNED + 5);
+    expect(tasks.map((task) => (task as { files: unknown[] }).files.length)).toEqual([MAX_SIGNED, 5]);
+    await media.remove(
+      files.map((file) => file.address),
+      api,
+    );
+    expect(s3.objects.size).toBe(0);
+    expect(tasks.slice(2).map((task) => (task as { addresses: unknown[] }).addresses.length)).toEqual([MAX_SIGNED, 5]);
+  });
+
   it("says what the site's CI is missing, in words for the editor", async () => {
     const { api } = await site(configured, { secrets: {} });
     await expect(signed(api, { action: "check" })).rejects.toThrow(/S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY/);
@@ -165,6 +187,21 @@ describe("media storage in the admin panel", () => {
     await expect(signed(api, { action: "remove", addresses: ["/media/a.jpg"] })).rejects.toThrow(
       /Only the site's owners/,
     );
+    expect(tasks).toHaveLength(0);
+  });
+
+  it("says when a full-stack site's server fails, rather than asking the CI without a word", async () => {
+    const answers: { status: number; body: string }[] = [
+      { status: 500, body: "Internal Server Error" },
+      { status: 200, body: "<html>A proxy's page</html>" },
+      { status: 401, body: '{"error":"signed-out"}' },
+    ];
+    const { api, tasks } = await site(configured, {
+      server: () => answers.shift() as { status: number; body: string },
+    });
+    await expect(signed(api, { action: "check" })).rejects.toThrow(/didn't sign the upload \(500\)/);
+    await expect(signed(api, { action: "check" })).rejects.toThrow(/didn't answer with signed addresses/);
+    await expect(signed(api, { action: "check" })).rejects.toThrow(/signed out/);
     expect(tasks).toHaveLength(0);
   });
 
@@ -249,7 +286,8 @@ describe("the plugin", () => {
     expect(plugin.permissions?.read).toEqual([SETTINGS_FILE]);
     expect(plugin.tasks?.map((task) => [task.id, task.module])).toEqual([["sign", "goodfellow-plugin-s3/sign"]]);
     expect(plugin.server).toBe("goodfellow-plugin-s3/server");
-    expect(plugin.mediaStorage?.maxBytes).toBe(5 * 1024 ** 3);
+    // R2 takes 5 MiB less than S3 in one upload.
+    expect(plugin.mediaStorage?.maxBytes).toBe(5 * 1024 ** 3 - 5 * 1024 ** 2);
     expect(plugin.admin).toBe("goodfellow-plugin-s3/admin");
   });
 });

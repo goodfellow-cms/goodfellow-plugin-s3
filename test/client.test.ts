@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isSignedRequests, StorageError, sendSigned } from "../src/client.js";
+import { ATTEMPTS, isSignedRequests, StorageError, sendSigned } from "../src/client.js";
 import { objectKey, objectUrl, type StorageSettings } from "../src/settings.js";
 import { type SignedRequest, signRequests } from "../src/signing.js";
 import { fakeS3 } from "./fake-s3.js";
@@ -53,6 +53,47 @@ describe("the bucket", () => {
     );
     await expect(refused).rejects.toThrow(StorageError);
     await expect(refused).rejects.toThrow(/403 SignatureDoesNotMatch.*put and delete files/);
+  });
+
+  it("tries again where the connection dropped or the storage was busy, but not where it refused", async () => {
+    const s3 = fakeS3({ keys: { KEY: "SECRET" } });
+    const [put] = await signRequests(
+      { action: "upload", files: [{ address: "/media/sermon.mp4", type: "video/mp4" }] },
+      settings,
+      credentials,
+    );
+    const waits: number[] = [];
+    const wait = async (ms: number) => {
+      waits.push(ms);
+    };
+    let failures = 2;
+    const flaky: typeof fetch = async (input, init) => {
+      if (failures-- === 2) throw new TypeError("Failed to fetch");
+      if (failures === 0) return new Response("<Error><Code>SlowDown</Code></Error>", { status: 503 });
+      return s3.fetch(input, init);
+    };
+    await sendSigned(put as SignedRequest, "keep it", new Blob(["video"]), flaky, wait);
+    expect(s3.objects.has("parish-media/site/sermon.mp4")).toBe(true);
+    expect(waits).toEqual([1000, 2000]);
+
+    // A refusal is said at once, and a connection that keeps dropping after the last try.
+    waits.length = 0;
+    const refused = sendSigned(
+      { ...(put as SignedRequest), headers: { "content-type": "text/html" } },
+      "keep it",
+      new Blob(["x"]),
+      s3.fetch,
+      wait,
+    );
+    await expect(refused).rejects.toThrow(/403/);
+    expect(waits).toEqual([]);
+    const down: typeof fetch = async () => {
+      throw new TypeError("Failed to fetch");
+    };
+    await expect(sendSigned(put as SignedRequest, "keep it", new Blob(["x"]), down, wait)).rejects.toThrow(
+      /didn't answer/,
+    );
+    expect(waits).toHaveLength(ATTEMPTS - 1);
   });
 
   it("refuses addresses once they've expired", async () => {

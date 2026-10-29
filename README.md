@@ -1,6 +1,6 @@
 # goodfellow-plugin-s3
 
-S3 storage for [Goodfellow](https://github.com/goodfellow-cms/goodfellow-cms) sites: the site's media kept in a bucket of any S3-compatible service, such as Amazon S3, Cloudflare R2, Backblaze B2, DigitalOcean Spaces or MinIO, instead of the site's repository. Files can be much larger, up to 5 GB each, such as long videos, and nothing goes into the repository's history.
+S3 storage for [Goodfellow](https://github.com/goodfellow-cms/goodfellow-cms) sites: the site's media kept in a bucket of any S3-compatible service, such as Amazon S3, Cloudflare R2, Backblaze B2, DigitalOcean Spaces or MinIO, instead of the site's repository. Files can be much larger, up to about 5 GB each, such as long videos, and nothing goes into the repository's history.
 
 Content still refers to files as `/media/…`, so pages don't change when the site's media moves. Goodfellow lists the files the bucket keeps in `content/media-storage.json`, and builds show them from the bucket's public address.
 

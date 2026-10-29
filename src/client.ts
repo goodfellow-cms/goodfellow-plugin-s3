@@ -38,29 +38,51 @@ async function refusal(response: Response, what: string): Promise<StorageError> 
   );
 }
 
-/** Makes a signed request, with a file's contents for a PUT. */
+/** How many times a request is tried where the connection dropped or the storage was briefly unavailable. */
+export const ATTEMPTS = 3;
+
+/** Answers that mean the storage couldn't take the request just then, which S3 asks to be tried again. */
+const TRY_AGAIN = [500, 502, 503, 504];
+
+const pause = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
+
+/**
+ * Makes a signed request, with a file's contents for a PUT. A request whose
+ * connection dropped, as a large upload's can, or that the storage was too
+ * busy for, is tried again, up to `ATTEMPTS` times, waiting a little longer
+ * each time: its address works for an hour, and putting or deleting the same
+ * file twice does the same as once.
+ */
 export async function sendSigned(
   request: SignedRequest,
   what: string,
   body?: Blob,
   fetcher: typeof fetch = fetch,
+  wait: (ms: number) => Promise<void> = pause,
 ): Promise<void> {
-  let response: Response;
-  try {
-    response = await fetcher(request.url, {
-      method: request.method,
-      headers: request.headers,
-      ...(body && { body }),
-      cache: "no-store",
-      credentials: "omit",
-    });
-  } catch {
-    throw new StorageError(
-      `The storage at ${new URL(request.url).origin} didn't answer. Check its address, and that the bucket's CORS settings allow PUT and DELETE from any origin.`,
-    );
+  for (let attempt = 1; ; attempt += 1) {
+    let response: Response | undefined;
+    try {
+      response = await fetcher(request.url, {
+        method: request.method,
+        headers: request.headers,
+        ...(body && { body }),
+        cache: "no-store",
+        credentials: "omit",
+      });
+    } catch {
+      response = undefined;
+    }
+    // Deleting a file that isn't there is done too.
+    if (response && (response.ok || (request.method === "DELETE" && response.status === 404))) return;
+    if (attempt >= ATTEMPTS || (response && !TRY_AGAIN.includes(response.status))) {
+      if (response) throw await refusal(response, what);
+      throw new StorageError(
+        `The storage at ${new URL(request.url).origin} didn't answer. Check its address, and that the bucket's CORS settings allow PUT and DELETE from any origin.`,
+      );
+    }
+    await wait(1000 * 2 ** (attempt - 1));
   }
-  // Deleting a file that isn't there is done too.
-  if (!response.ok && !(request.method === "DELETE" && response.status === 404)) throw await refusal(response, what);
 }
 
 /** Whether an answer is a list of signed requests, as the task and the server module give them. */
