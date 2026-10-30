@@ -13,6 +13,19 @@ import { type Credentials, presignUrl } from "./sigv4.js";
  */
 export const KEY_ID_SECRET = "S3_ACCESS_KEY_ID";
 export const SECRET_KEY_SECRET = "S3_SECRET_ACCESS_KEY";
+/**
+ * The bucket the keys may be used for, with the site's folder in it where it
+ * has one (`parish-media` or `parish-media/site/`). Editors can change the
+ * settings file, so without it they could point the keys at any bucket the
+ * keys reach, and delete what's there; the signer signs only for this one.
+ */
+export const BUCKET_SECRET = "S3_BUCKET";
+
+/**
+ * As large a file as the admin panel sends, in one upload: S3 takes up to
+ * 5 GiB in one, and Cloudflare R2 5 MiB less.
+ */
+export const MAX_BYTES = 5 * 1024 * 1024 * 1024 - 5 * 1024 * 1024;
 
 /** How long a signed address works for, in seconds: long enough for a large file to start uploading. */
 export const SIGNED_SECONDS = 3600;
@@ -21,12 +34,17 @@ export const MAX_SIGNED = 100;
 
 /** What the admin module asks to have signed. */
 export type SignInput =
-  | { action: "upload"; files: { address: string; type: string }[] }
+  /** Each file's size is signed, so the bucket takes only a file of that size. */
+  | { action: "upload"; files: { address: string; type: string; size: number }[] }
   | { action: "remove"; addresses: string[] }
   /** A small file to put and delete again, to try the settings, keys and the bucket's CORS settings together. */
   | { action: "check" };
 
-/** A request the browser makes, at a signed address, with these headers. */
+/**
+ * A request the browser makes, at a signed address, with these headers. A
+ * PUT's `content-length` is signed too, but not among them, since browsers
+ * send it themselves, from the body.
+ */
 export interface SignedRequest {
   method: "PUT" | "DELETE";
   /** The media address it's for; none for the check's file. */
@@ -34,6 +52,9 @@ export interface SignedRequest {
   url: string;
   headers: Record<string, string>;
 }
+
+/** The check's file's contents, whose size its signature names. */
+export const CHECK_BODY = "ok";
 
 /**
  * The type each kind of file the bucket keeps is served as, by its address's
@@ -87,6 +108,42 @@ export function credentialsFrom(secrets: Record<string, string | undefined>): Cr
   return accessKeyId && secretAccessKey ? { accessKeyId, secretAccessKey } : undefined;
 }
 
+/** Where the keys may be used: a bucket, and a folder in it, or `""` for the whole bucket. */
+export interface PinnedPlace {
+  bucket: string;
+  folder: string;
+}
+
+/** The place `BUCKET_SECRET` names, or nothing without it, or where it isn't a bucket's name and folder. */
+export function pinnedFrom(secrets: Record<string, string | undefined>): PinnedPlace | undefined {
+  const value = secrets[BUCKET_SECRET]?.trim().replace(/^\/+/, "");
+  if (!value) return undefined;
+  const slash = value.indexOf("/");
+  const bucket = slash < 0 ? value : value.slice(0, slash);
+  const rest = slash < 0 ? "" : value.slice(slash + 1);
+  const folder = rest && !rest.endsWith("/") ? `${rest}/` : rest;
+  if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket)) return undefined;
+  if (folder && !/^([\w.~-]+\/)+$/.test(folder)) return undefined;
+  if (folder.split("/").some((part) => part === "." || part === "..")) return undefined;
+  return { bucket, folder };
+}
+
+/** What signing needs from the secrets: the keys and the place they're for. */
+export interface SigningKeys {
+  credentials: Credentials | undefined;
+  place: PinnedPlace | undefined;
+}
+
+/** The keys and their place, from the secrets the task or server was given. */
+export function keysFrom(secrets: Record<string, string | undefined>): SigningKeys {
+  return { credentials: credentialsFrom(secrets), place: pinnedFrom(secrets) };
+}
+
+/** Whether settings keep files where the secrets say the keys may be used: the same bucket, in the folder or under it. */
+export function isPinnedPlace(settings: StorageSettings, place: PinnedPlace): boolean {
+  return settings.bucket === place.bucket && settings.folder.startsWith(place.folder);
+}
+
 function strings(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
@@ -103,13 +160,19 @@ export function signInput(value: unknown): SignInput {
     Array.isArray(input.files) &&
     input.files.length <= MAX_SIGNED &&
     input.files.every(
-      (file) => typeof file?.address === "string" && (file.type === undefined || typeof file.type === "string"),
+      (file) =>
+        typeof file?.address === "string" &&
+        (file.type === undefined || typeof file.type === "string") &&
+        Number.isSafeInteger(file.size) &&
+        file.size >= 0,
     )
   ) {
-    const files = input.files as { address: string; type?: string }[];
+    const files = input.files as { address: string; type?: string; size: number }[];
+    const large = files.find((file) => file.size > MAX_BYTES);
+    if (large) throw new Error(`${large.address} is larger than S3 storage takes in one upload.`);
     return {
       action: "upload",
-      files: files.map(({ address, type }) => ({ address, type: type || "application/octet-stream" })),
+      files: files.map(({ address, type, size }) => ({ address, type: type || "application/octet-stream", size })),
     };
   }
   throw new Error("S3 storage was asked for something it doesn't sign.");
@@ -119,22 +182,38 @@ export function signInput(value: unknown): SignInput {
 export async function signRequests(
   input: unknown,
   settings: StorageSettings | undefined,
-  credentials: Credentials | undefined,
+  keys: SigningKeys,
   date: Date = new Date(),
 ): Promise<SignedRequest[]> {
   const asked = signInput(input);
   if (!settings) throw new Error("S3 storage isn't set up yet: save its settings first.");
+  const { credentials, place } = keys;
   if (!credentials) {
     throw new Error(
       `The site has no keys for the bucket. A developer needs to add ${KEY_ID_SECRET} and ${SECRET_KEY_SECRET} to its secrets.`,
     );
   }
-  const sign = async (method: SignedRequest["method"], key: string, headers: Record<string, string> = {}) => ({
+  if (!place) {
+    throw new Error(
+      `The site doesn't say which bucket its keys are for. A developer needs to add ${BUCKET_SECRET} to its secrets: the bucket's name, with the folder after a slash where the settings have one.`,
+    );
+  }
+  if (!isPinnedPlace(settings, place)) {
+    throw new Error(
+      `The settings keep files somewhere other than the bucket and folder the site's ${BUCKET_SECRET} secret names, so nothing was signed. Change the settings back, or have a developer change the secret.`,
+    );
+  }
+  const sign = async (
+    method: SignedRequest["method"],
+    key: string,
+    headers: Record<string, string> = {},
+    size?: number,
+  ): Promise<SignedRequest> => ({
     method,
     url: await presignUrl({
       method,
       url: objectUrl(settings, key),
-      headers,
+      headers: size === undefined ? headers : { ...headers, "content-length": String(size) },
       credentials,
       region: settings.region,
       expires: SIGNED_SECONDS,
@@ -144,7 +223,7 @@ export async function signRequests(
   });
   if (asked.action === "check") {
     const key = `${settings.folder}${CHECK_KEY}`;
-    return [await sign("PUT", key, { "content-type": "text/plain" }), await sign("DELETE", key)];
+    return [await sign("PUT", key, { "content-type": "text/plain" }, CHECK_BODY.length), await sign("DELETE", key)];
   }
   if (asked.action === "remove") {
     return Promise.all(
@@ -155,14 +234,14 @@ export async function signRequests(
   // without bucket-wide settings, that anyone may read it.
   const readable: Record<string, string> = settings.publicRead ? { "x-amz-acl": "public-read" } : {};
   return Promise.all(
-    asked.files.map(async ({ address }) => {
+    asked.files.map(async ({ address, size }) => {
       const key = objectKey(settings, address);
       const type = contentTypeOf(address);
       if (!type) throw new Error(`${address} isn't a kind of file S3 storage keeps.`);
       // An SVG can hold a script, which runs where it's opened on its own: it's downloaded instead, and still
       // shows in pages' images. The admin panel cleans SVGs first, but a signed address takes whatever is sent.
       const opened: Record<string, string> = type === "image/svg+xml" ? { "content-disposition": "attachment" } : {};
-      return { ...(await sign("PUT", key, { "content-type": type, ...opened, ...readable })), address };
+      return { ...(await sign("PUT", key, { "content-type": type, ...opened, ...readable }, size)), address };
     }),
   );
 }

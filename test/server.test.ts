@@ -35,7 +35,10 @@ describe("the server module", () => {
     });
 
   it("signs uploads straight away for editors, with the keys in the server's environment", async () => {
-    const answer = s3Server({ root, env: { S3_ACCESS_KEY_ID: "KEY", S3_SECRET_ACCESS_KEY: "SECRET" } });
+    const answer = s3Server({
+      root,
+      env: { S3_ACCESS_KEY_ID: "KEY", S3_SECRET_ACCESS_KEY: "SECRET", S3_BUCKET: "parish-media" },
+    });
     const response = await answer(ask({ action: "check" }), { path: "sign", editor });
     expect(response.status).toBe(200);
     const { requests } = (await response.json()) as {
@@ -48,7 +51,10 @@ describe("the server module", () => {
   });
 
   it("signs deletes for the site's owners only, since editors can be limited to some of the site", async () => {
-    const answer = s3Server({ root, env: { S3_ACCESS_KEY_ID: "KEY", S3_SECRET_ACCESS_KEY: "SECRET" } });
+    const answer = s3Server({
+      root,
+      env: { S3_ACCESS_KEY_ID: "KEY", S3_SECRET_ACCESS_KEY: "SECRET", S3_BUCKET: "parish-media" },
+    });
     const remove = { action: "remove", addresses: ["/media/sermon.mp4"] };
     const refused = await answer(ask(remove), { path: "sign", editor });
     expect(refused.status).toBe(403);
@@ -56,12 +62,22 @@ describe("the server module", () => {
     const owner = { login: "olive", role: "owner" as const };
     expect((await answer(ask(remove), { path: "sign", editor: owner })).status).toBe(200);
     // Editors still upload.
-    const upload = { action: "upload", files: [{ address: "/media/a.jpg", type: "image/jpeg" }] };
+    const upload = { action: "upload", files: [{ address: "/media/a.jpg", type: "image/jpeg", size: 1 }] };
     expect((await answer(ask(upload), { path: "sign", editor })).status).toBe(200);
   });
 
+  it("signs nothing without the bucket its keys are for", async () => {
+    const answer = s3Server({ root, env: { S3_ACCESS_KEY_ID: "KEY", S3_SECRET_ACCESS_KEY: "SECRET" } });
+    const response = await answer(ask({ action: "check" }), { path: "sign", editor });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: "not-signed", message: expect.stringMatching(/S3_BUCKET/) });
+  });
+
   it("answers only signed-in editors, and leaves it to the CI without keys", async () => {
-    const withKeys = s3Server({ root, env: { S3_ACCESS_KEY_ID: "KEY", S3_SECRET_ACCESS_KEY: "SECRET" } });
+    const withKeys = s3Server({
+      root,
+      env: { S3_ACCESS_KEY_ID: "KEY", S3_SECRET_ACCESS_KEY: "SECRET", S3_BUCKET: "parish-media" },
+    });
     expect((await withKeys(ask({ action: "check" }), { path: "sign", editor: null })).status).toBe(401);
     expect((await withKeys(ask({ action: "check" }), { path: "other", editor })).status).toBe(404);
     const without = s3Server({ root, env: {} });

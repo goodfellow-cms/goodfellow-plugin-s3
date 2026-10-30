@@ -3,7 +3,8 @@ import { presignUrl } from "../src/sigv4.js";
 /**
  * An S3-compatible service in memory, as a `fetch`: it checks each request's
  * presigned address against the keys it knows, as S3 does (the signature,
- * the signed headers' values, and that it hasn't expired), and keeps objects
+ * the signed headers' values, the body's size where it's signed, and that it
+ * hasn't expired), and keeps objects
  * by bucket and key.
  */
 export function fakeS3(options: { keys: Record<string, string>; region?: string; now?: () => Date }) {
@@ -35,6 +36,9 @@ export function fakeS3(options: { keys: Record<string, string>; region?: string;
     if ((options.now?.() ?? new Date()).getTime() > date.getTime() + expires * 1000) {
       return error(403, "AccessDenied");
     }
+    // Browsers send a body's size themselves, which S3 checks where it's signed.
+    const body = init.body instanceof Blob ? new Uint8Array(await init.body.arrayBuffer()) : new Uint8Array();
+    if (method === "PUT") headers["content-length"] = String(body.byteLength);
     const signedNames = (query.get("X-Amz-SignedHeaders") ?? "").split(";").filter((name) => name !== "host");
     const unsigned = new URL(url);
     for (const name of [...unsigned.searchParams.keys()]) {
@@ -52,7 +56,6 @@ export function fakeS3(options: { keys: Record<string, string>; region?: string;
     if (expected !== url.href || region !== (options.region ?? "auto")) return error(403, "SignatureDoesNotMatch");
     const key = decodeURIComponent(url.pathname.slice(1));
     if (method === "PUT") {
-      const body = init.body instanceof Blob ? new Uint8Array(await init.body.arrayBuffer()) : new Uint8Array();
       objects.set(key, { body, type: headers["content-type"] ?? "" });
       return new Response(null, { status: 200 });
     }

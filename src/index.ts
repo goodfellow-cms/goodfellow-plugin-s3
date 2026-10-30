@@ -9,10 +9,11 @@
 
 import { type CustomService, servicesFrom } from "./services.js";
 import { MEDIA_STORAGE_FILE, SETTINGS_FILE } from "./settings.js";
-import { KEY_ID_SECRET, SECRET_KEY_SECRET } from "./signing.js";
+import { BUCKET_SECRET, KEY_ID_SECRET, MAX_BYTES, SECRET_KEY_SECRET } from "./signing.js";
 import type { GoodfellowPlugin } from "./types.js";
 
 export { type CustomService, SERVICES, type StorageService } from "./services.js";
+export { MAX_BYTES } from "./signing.js";
 
 export interface S3Options {
   /**
@@ -22,12 +23,6 @@ export interface S3Options {
    */
   services?: CustomService[];
 }
-
-/**
- * As large a file as the admin panel sends, in one upload: S3 takes up to
- * 5 GiB in one, and Cloudflare R2 5 MiB less.
- */
-export const MAX_BYTES = 5 * 1024 * 1024 * 1024 - 5 * 1024 * 1024;
 
 /** The plugin, offering the services in `SERVICES` and any more given. */
 export function s3(options: S3Options = {}): GoodfellowPlugin {
@@ -42,7 +37,7 @@ export function s3(options: S3Options = {}): GoodfellowPlugin {
       // Its screen sends files to the services it offers, and nowhere else.
       connect: [...new Set(services.flatMap((service) => service.connect))],
       files: [SETTINGS_FILE, MEDIA_STORAGE_FILE],
-      secrets: [KEY_ID_SECRET, SECRET_KEY_SECRET],
+      secrets: [KEY_ID_SECRET, SECRET_KEY_SECRET, BUCKET_SECRET],
       read: [SETTINGS_FILE],
     },
     admin: "goodfellow-plugin-s3/admin",
