@@ -1,4 +1,4 @@
-# Keeps the actions this repository's workflows use, each pinned to a commit, up to date.
+# Keeps the actions this repository's workflows use, each pinned to a commit, and its packages up to date.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -7,4 +7,12 @@ updates:
       interval: weekly
     groups:
       actions:
+        patterns: ["*"]
+  # Its packages. Security updates come as they're published; the rest once a week, together.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      packages:
         patterns: ["*"]
