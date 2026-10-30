@@ -20,7 +20,7 @@ import {
   storedMediaText,
   tidySettings,
 } from "./settings.js";
-import { KEY_ID_SECRET, SECRET_KEY_SECRET, type SignedRequest, type SignInput } from "./signing.js";
+import { KEY_ID_SECRET, MAX_SIGNED, SECRET_KEY_SECRET, type SignedRequest, type SignInput } from "./signing.js";
 import type { PluginAdmin, PluginAdminApi, PluginMediaFile, PluginMediaReady } from "./types.js";
 
 /** How many files go to the bucket at once. */
@@ -71,28 +71,54 @@ async function ready(api: PluginAdminApi): Promise<void> {
   if (problem) throw new StorageError(problem.message);
 }
 
+/** An answer's JSON, or `undefined` where it isn't any, such as a proxy's page. */
+function parsed(text: string): Record<string, unknown> | undefined {
+  try {
+    const value: unknown = JSON.parse(text);
+    return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Has requests signed where the keys are: a full-stack site's server, where
  * it has them, straight away, or else the site's CI, through the `sign` task.
+ * Only a server without the keys (404) leaves it to the CI: anything else it
+ * answers is said, rather than costing each upload a minute without a word.
  */
 export async function signed(api: PluginAdminApi, input: SignInput): Promise<SignedRequest[]> {
   if (api.plugin.server) {
     const answer = await api
       .server("sign", { method: "POST", body: JSON.stringify(input), headers: { "content-type": "application/json" } })
       .catch(() => undefined);
-    if (answer?.status === 200) {
-      const { requests } = JSON.parse(answer.body) as { requests?: unknown };
-      if (isSignedRequests(requests)) return requests;
+    if (!answer) throw new StorageError("The site's server couldn't be reached to sign the upload. Try again.");
+    const body = parsed(answer.body);
+    if (answer.status === 200) {
+      if (isSignedRequests(body?.requests)) return body.requests;
+      throw new StorageError("The site's server didn't answer with signed addresses for the upload.");
     }
-    if (answer?.status === 400) {
-      const { message } = JSON.parse(answer.body) as { message?: unknown };
-      throw new StorageError(typeof message === "string" ? message : "The site's server didn't sign the upload.");
+    if (answer.status === 401) throw new StorageError("You've been signed out. Sign in again, then try again.");
+    if (answer.status !== 404) {
+      const message = body?.message;
+      throw new StorageError(
+        typeof message === "string"
+          ? message
+          : `The site's server didn't sign the upload (${answer.status}). A developer can find out why in its logs.`,
+      );
     }
     // Without keys of its own, the server leaves it to the CI.
   }
   const requests = await api.task("sign", input);
   if (!isSignedRequests(requests)) throw new StorageError("The site's build service didn't sign the upload.");
   return requests;
+}
+
+/** Lists in pieces of at most `MAX_SIGNED`, as many as one request to sign may hold. */
+function batches<T>(items: readonly T[]): T[][] {
+  const pieces: T[][] = [];
+  for (let start = 0; start < items.length; start += MAX_SIGNED) pieces.push(items.slice(start, start + MAX_SIGNED));
+  return pieces;
 }
 
 /** Runs `send` for each item, a few at a time, stopping at the first that fails. */
@@ -112,16 +138,19 @@ export async function uploadFiles(
 ): Promise<void> {
   if (files.length === 0) return;
   await ready(api);
-  const requests = await signed(api, {
-    action: "upload",
-    files: files.map(({ address, type }) => ({ address, type: type || "application/octet-stream" })),
-  });
-  const byAddress = new Map(requests.map((request) => [request.address, request]));
-  await eachLimited(files, async (file) => {
-    const request = byAddress.get(file.address);
-    if (request?.method !== "PUT") throw new StorageError(`The upload of ${file.address} wasn't signed.`);
-    await sendSigned(request, `keep ${file.address}`, file.data, fetcher);
-  });
+  // More files than one request to sign holds are signed, and sent, a batch at a time.
+  for (const batch of batches(files)) {
+    const requests = await signed(api, {
+      action: "upload",
+      files: batch.map(({ address, type }) => ({ address, type: type || "application/octet-stream" })),
+    });
+    const byAddress = new Map(requests.map((request) => [request.address, request]));
+    await eachLimited(batch, async (file) => {
+      const request = byAddress.get(file.address);
+      if (request?.method !== "PUT") throw new StorageError(`The upload of ${file.address} wasn't signed.`);
+      await sendSigned(request, `keep ${file.address}`, file.data, fetcher);
+    });
+  }
 }
 
 /** Removes files from the bucket by their media addresses. */
@@ -132,13 +161,15 @@ export async function removeFiles(
 ): Promise<void> {
   if (addresses.length === 0) return;
   await ready(api);
-  const requests = await signed(api, { action: "remove", addresses: [...addresses] });
   const failed: string[] = [];
-  await eachLimited(requests, async (request) => {
-    await sendSigned(request, `remove ${request.address}`, undefined, fetcher).catch(() => {
-      failed.push(request.address ?? "");
+  for (const batch of batches(addresses)) {
+    const requests = await signed(api, { action: "remove", addresses: batch });
+    await eachLimited(requests, async (request) => {
+      await sendSigned(request, `remove ${request.address}`, undefined, fetcher).catch(() => {
+        failed.push(request.address ?? "");
+      });
     });
-  });
+  }
   if (failed.length > 0) throw new StorageError(`The storage kept ${failed.join(", ")}.`);
 }
 

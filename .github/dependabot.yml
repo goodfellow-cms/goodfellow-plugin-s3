@@ -1,0 +1,10 @@
+# Keeps the actions this repository's workflows use, each pinned to a commit, up to date.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

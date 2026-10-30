@@ -7,7 +7,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseSettings, SETTINGS_FILE } from "./settings.js";
-import { credentialsFrom, signRequests } from "./signing.js";
+import { credentialsFrom, signInput, signRequests } from "./signing.js";
 import type { PluginServerContext } from "./types.js";
 
 const json = (status: number, body: unknown) =>
@@ -16,7 +16,10 @@ const json = (status: number, body: unknown) =>
     headers: { "content-type": "application/json", "cache-control": "no-store" },
   });
 
-/** Answers `sign` for editors signed in to the site; reads its settings from the site's files beside the server. */
+/**
+ * Answers `sign` for editors signed in to the site, deletes for its owners only;
+ * reads its settings from the site's files beside the server.
+ */
 export function s3Server(options: { root?: string; env?: Record<string, string | undefined> } = {}) {
   return async (request: Request, context: PluginServerContext): Promise<Response> => {
     if (context.path !== "sign") return json(404, { error: "not-found" });
@@ -27,7 +30,16 @@ export function s3Server(options: { root?: string; env?: Record<string, string |
     const root = options.root ?? process.cwd();
     const settings = parseSettings(await readFile(join(root, SETTINGS_FILE), "utf8").catch(() => undefined));
     try {
-      return json(200, { requests: await signRequests(await request.json(), settings, credentials) });
+      const input = signInput(await request.json());
+      // Deleting stored files is for owners: editors can be limited to some of the site, which the server can't
+      // see, so it doesn't sign deletes for them.
+      if (input.action === "remove" && context.editor.role !== "owner") {
+        return json(403, {
+          error: "not-allowed",
+          message: "Only the site's owners can delete files kept in S3 storage.",
+        });
+      }
+      return json(200, { requests: await signRequests(input, settings, credentials) });
     } catch (error) {
       return json(400, { error: "not-signed", message: error instanceof Error ? error.message : String(error) });
     }

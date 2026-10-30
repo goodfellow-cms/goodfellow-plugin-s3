@@ -23,8 +23,11 @@ export interface S3Options {
   services?: CustomService[];
 }
 
-/** S3 takes files up to 5 GB in one upload, which is as large as the admin panel sends. */
-export const MAX_BYTES = 5 * 1024 * 1024 * 1024;
+/**
+ * As large a file as the admin panel sends, in one upload: S3 takes up to
+ * 5 GiB in one, and Cloudflare R2 5 MiB less.
+ */
+export const MAX_BYTES = 5 * 1024 * 1024 * 1024 - 5 * 1024 * 1024;
 
 /** The plugin, offering the services in `SERVICES` and any more given. */
 export function s3(options: S3Options = {}): GoodfellowPlugin {

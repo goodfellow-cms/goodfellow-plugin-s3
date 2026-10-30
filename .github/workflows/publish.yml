@@ -1,0 +1,39 @@
+# Publishes a release to npm when a GitHub release is published, with npm's
+# provenance, so Goodfellow's Plugins screen can say which repository it was
+# built from. npm's trusted publishing lets this workflow publish without a
+# token: set it up once on npmjs.com, under the package's Settings.
+name: Publish
+
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          check-latest: true
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - name: Check the release's tag is the package's version
+        run: test "v$(node -p 'require("./package.json").version')" = "$GITHUB_REF_NAME"
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      # The manifest the build writes must be the one committed, which Goodfellow's Plugins screen reads.
+      - run: npm run build
+      - run: git diff --exit-code goodfellow-plugin.json
+      # What's published is what was just built from this commit: `.npmrc`'s `ignore-scripts` keeps npm from running
+      # any script of its own while publishing.
+      - run: npm publish --provenance --access public

@@ -130,17 +130,44 @@ export function storedMediaText(plugin: string, url: string, before: StoredMedia
   return `${JSON.stringify({ version: 1, plugin, url, files }, null, 2)}\n`;
 }
 
-/** The object's key in the bucket for a media address: `/media/sermon.mp4` is `<folder>sermon.mp4`. */
-export function objectKey(settings: StorageSettings, address: string): string {
-  if (!/^\/media\/[\w.~%-]+(\/[\w.~%-]+)*$/.test(address) || address.split("/").some((part) => /^\.+$/.test(part))) {
-    throw new Error(`${address} isn't a media address S3 storage can keep.`);
+/** A media address's part, decoded, if it's one a file can have: not `.` or `..`, and no `/`, `\`, `%` or control characters. */
+function keyPart(part: string): string | undefined {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(part);
+  } catch {
+    return undefined;
   }
-  return `${settings.folder}${decodeURIComponent(address.slice("/media/".length))}`;
+  // Checked once decoded, since that's what the key holds: `%2e%2e` is `..`, and `%252e` would be `%2e` in a key.
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what it refuses
+  if (decoded === "" || /^\.+$/.test(decoded) || /[/\\%\u0000-\u001f\u007f]/.test(decoded)) return undefined;
+  return decoded;
 }
 
-/** The address requests for an object go to, in path style, which every S3-compatible service answers. */
+/** The object's key in the bucket for a media address: `/media/sermon.mp4` is `<folder>sermon.mp4`. */
+export function objectKey(settings: StorageSettings, address: string): string {
+  const parts = /^\/media\/[\w.~%-]+(\/[\w.~%-]+)*$/.test(address)
+    ? address.slice("/media/".length).split("/").map(keyPart)
+    : [undefined];
+  if (parts.some((part) => part === undefined)) {
+    throw new Error(`${address} isn't a media address S3 storage can keep.`);
+  }
+  return `${settings.folder}${parts.join("/")}`;
+}
+
+/**
+ * The address requests for an object go to, in path style, which every
+ * S3-compatible service answers. Refuses a key the address would read
+ * differently, such as one with `..` in it, so what's signed is only ever
+ * an object in the site's folder.
+ */
 export function objectUrl(settings: StorageSettings, key: string): URL {
   // Encoded as signatures encode it, so the address sent is the one signed.
   const path = uriEncode(`${settings.bucket}/${key}`, true);
-  return new URL(`${settings.endpoint}/${path}`);
+  const url = new URL(`${settings.endpoint}/${path}`);
+  const expected = `${new URL(settings.endpoint).pathname.replace(/\/$/, "")}/${path}`;
+  if (url.pathname !== expected || !key.startsWith(settings.folder)) {
+    throw new Error(`${key} isn't an object S3 storage can keep.`);
+  }
+  return url;
 }

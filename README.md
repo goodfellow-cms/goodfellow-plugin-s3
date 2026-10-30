@@ -1,6 +1,6 @@
 # goodfellow-plugin-s3
 
-S3 storage for [Goodfellow](https://github.com/goodfellow-cms/goodfellow-cms) sites: the site's media kept in a bucket of any S3-compatible service, such as Amazon S3, Cloudflare R2, Backblaze B2, DigitalOcean Spaces or MinIO, instead of the site's repository. Files can be much larger, up to 5 GB each, such as long videos, and nothing goes into the repository's history.
+S3 storage for [Goodfellow](https://github.com/goodfellow-cms/goodfellow-cms) sites: the site's media kept in a bucket of any S3-compatible service, such as Amazon S3, Cloudflare R2, Backblaze B2, DigitalOcean Spaces or MinIO, instead of the site's repository. Files can be much larger, up to about 5 GB each, such as long videos, and nothing goes into the repository's history.
 
 Content still refers to files as `/media/…`, so pages don't change when the site's media moves. Goodfellow lists the files the bucket keeps in `content/media-storage.json`, and builds show them from the bucket's public address.
 
@@ -13,6 +13,7 @@ It needs Goodfellow 0.6 or later, with the starters' setup for plugins' tasks: `
 - **Full-stack sites** can keep the keys in their server's environment instead, which signs uploads straight away (see below).
 - **Moving the site's media:** once the plugin is set up, the Media screen offers to move the files already in the site's own files to the bucket, and to move them back (files up to 25 MB), in one publish each.
 - **Settings:** the service, the bucket, its region (or Cloudflare account) and the files' public address are in `content/s3-storage.json`, which holds no keys.
+- **What it signs:** only files in the site's folder of the bucket, at the media library's addresses, and only the kinds of file the media library takes (photos, documents, sound and video), each served as the type its name says, whatever the browser asks for. An SVG opened on its own is downloaded rather than shown, since an SVG can hold a script; pages show it as usual.
 
 ## Installing
 
@@ -114,6 +115,8 @@ export const { GET, POST } = goodfellowApi({
 
 It reads the bucket's settings from the server's copy of the site's files, so a change to them takes effect once the server has been rebuilt. Without the keys, the plugin signs through the CI as on any other site.
 
+The server signs uploads for every editor signed in, and deletes for the site's owners only: editors can be limited to some of the site, and the server can't see those limits, so only owners can delete files kept in the bucket.
+
 ## Trying it out locally
 
 `goodfellow dev` and `next dev` run plugins' tasks on your computer. They read the secrets from the site's `.env.local` each time, which the starters' `.gitignore` keeps out of the site's files:
@@ -138,7 +141,13 @@ npm run build
 
 `npm run build` also writes `goodfellow-plugin.json`, what the plugin asks to do, which Goodfellow's Plugins screen shows before it's installed; commit it with any change to the plugin's permissions.
 
-Every change that reaches the published plugin needs a changeset: run `npx changeset`, choose patch, minor or major, and describe the change for the plugin's users. It writes a file in `.changeset/`, which goes in the same pull request. To release, run `npm run release:version`, which turns the changesets into a new `version` in `package.json` and an entry in `CHANGELOG.md`, and puts the same version in the plugin's description in `src/index.ts`, which a test keeps the same; commit what it changes, then publish that commit to npm.
+Every change that reaches the published plugin needs a changeset: run `npx changeset`, choose patch, minor or major, and describe the change for the plugin's users. It writes a file in `.changeset/`, which goes in the same pull request.
+
+1. Run `npm run release:version`, which turns the changesets into a new `version` in `package.json` and an entry in `CHANGELOG.md`, and puts the same version in the plugin's description in `src/index.ts`, which a test keeps the same. Commit what it changes. Every release needs a new version: npm never lets one be published twice.
+2. Publish a GitHub release whose tag is `v` and the version, such as `v0.1.2`.
+3. [`publish.yml`](.github/workflows/publish.yml) checks the plugin again and publishes it to npm with [provenance](https://docs.npmjs.com/generating-provenance-statements), which the Plugins screen shows owners: which repository and commit it was built from.
+
+It publishes through npm's [trusted publishing](https://docs.npmjs.com/trusted-publishers), so the repository holds no npm token: set the package's trusted publisher on npmjs.com, in its settings, to this repository and `publish.yml`, once. The Plugins screen offers a release once it's three days old.
 
 `peerDependencies` names the Goodfellow releases it works with, as a range on `@goodfellow-cms/core` (`>=0.6.0 <1.0.0`). Goodfellow's Plugins screen offers a release only to sites on a Goodfellow release in that range, so narrow it in a new version if a Goodfellow release breaks the plugin. A caret range such as `^0.6.0` would mean 0.6 alone.
 

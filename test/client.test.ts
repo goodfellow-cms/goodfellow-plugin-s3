@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isSignedRequests, StorageError, sendSigned } from "../src/client.js";
+import { ATTEMPTS, isSignedRequests, StorageError, sendSigned } from "../src/client.js";
 import { objectKey, objectUrl, type StorageSettings } from "../src/settings.js";
 import { type SignedRequest, signRequests } from "../src/signing.js";
 import { fakeS3 } from "./fake-s3.js";
@@ -55,6 +55,47 @@ describe("the bucket", () => {
     await expect(refused).rejects.toThrow(/403 SignatureDoesNotMatch.*put and delete files/);
   });
 
+  it("tries again where the connection dropped or the storage was busy, but not where it refused", async () => {
+    const s3 = fakeS3({ keys: { KEY: "SECRET" } });
+    const [put] = await signRequests(
+      { action: "upload", files: [{ address: "/media/sermon.mp4", type: "video/mp4" }] },
+      settings,
+      credentials,
+    );
+    const waits: number[] = [];
+    const wait = async (ms: number) => {
+      waits.push(ms);
+    };
+    let failures = 2;
+    const flaky: typeof fetch = async (input, init) => {
+      if (failures-- === 2) throw new TypeError("Failed to fetch");
+      if (failures === 0) return new Response("<Error><Code>SlowDown</Code></Error>", { status: 503 });
+      return s3.fetch(input, init);
+    };
+    await sendSigned(put as SignedRequest, "keep it", new Blob(["video"]), flaky, wait);
+    expect(s3.objects.has("parish-media/site/sermon.mp4")).toBe(true);
+    expect(waits).toEqual([1000, 2000]);
+
+    // A refusal is said at once, and a connection that keeps dropping after the last try.
+    waits.length = 0;
+    const refused = sendSigned(
+      { ...(put as SignedRequest), headers: { "content-type": "text/html" } },
+      "keep it",
+      new Blob(["x"]),
+      s3.fetch,
+      wait,
+    );
+    await expect(refused).rejects.toThrow(/403/);
+    expect(waits).toEqual([]);
+    const down: typeof fetch = async () => {
+      throw new TypeError("Failed to fetch");
+    };
+    await expect(sendSigned(put as SignedRequest, "keep it", new Blob(["x"]), down, wait)).rejects.toThrow(
+      /didn't answer/,
+    );
+    expect(waits).toHaveLength(ATTEMPTS - 1);
+  });
+
   it("refuses addresses once they've expired", async () => {
     const s3 = fakeS3({ keys: { KEY: "SECRET" }, now: () => new Date("2026-10-25T12:00:00Z") });
     const [put] = await signRequests(
@@ -89,6 +130,26 @@ describe("the bucket", () => {
     expect(objectKey(settings, "/media/2024/choir.jpg")).toBe("site/2024/choir.jpg");
     expect(() => objectKey(settings, "/media/../secrets")).toThrow();
     expect(() => objectKey(settings, "/about")).toThrow();
+    expect(objectKey(settings, "/media/Easter%20service.jpg")).toBe("site/Easter service.jpg");
+    // Encoded, `..` and `/` would leave the site's folder, or the bucket: they're checked once decoded.
+    for (const address of [
+      "/media/%2e%2e/escaped.txt",
+      "/media/%2E%2E/%2e%2e/other-bucket/x.js",
+      "/media/.%2e/x",
+      "/media/a%2fb.txt",
+      "/media/a%2F..%2Fb.txt",
+      "/media/a%5c..%5cb.txt",
+      "/media/a%00.txt",
+      "/media/a%0a.txt",
+      "/media/a%252e%252e.txt",
+      "/media/a%zz.txt",
+      "/media/a//b.txt",
+    ]) {
+      expect(() => objectKey(settings, address), address).toThrow(/isn't a media address/);
+    }
+    // And a key that reaches the address another way is refused there too.
+    expect(() => objectUrl(settings, "site/../escaped.txt")).toThrow(/isn't an object/);
+    expect(() => objectUrl(settings, "other/x.txt")).toThrow(/isn't an object/);
     expect(objectUrl({ ...settings, folder: "" }, "a b.jpg").href).toBe(
       "https://account.r2.cloudflarestorage.com/parish-media/a%20b.jpg",
     );
