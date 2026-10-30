@@ -1,7 +1,9 @@
-# Publishes a release to npm when a GitHub release is published, with npm's
-# provenance, so Goodfellow's Plugins screen can say which repository it was
-# built from. npm's trusted publishing lets this workflow publish without a
-# token: set it up once on npmjs.com, under the package's Settings.
+# Stages a release on npm, with npm's provenance, when a GitHub release is
+# published. A maintainer then approves it on npm, which publishes it, so nothing
+# reaches npm without their two-factor authentication. Provenance lets
+# Goodfellow's Plugins screen say which repository it was built from. npm's
+# trusted publishing lets this workflow stage it without a token: set it up once,
+# for staged publishing only, as the README says.
 name: Publish
 
 on:
@@ -34,6 +36,22 @@ jobs:
       # The manifest the build writes must be the one committed, which Goodfellow's Plugins screen reads.
       - run: npm run build
       - run: git diff --exit-code goodfellow-plugin.json
-      # What's published is what was just built from this commit: `.npmrc`'s `ignore-scripts` keeps npm from running
-      # any script of its own while publishing.
-      - run: npm publish --provenance --access public
+      # What's staged is what was just built from this commit: `.npmrc`'s `ignore-scripts` keeps npm from running
+      # any script of the package's own while packing.
+      # Staged publishing needs npm 11.15.0 or later. An exact release, so what publishes doesn't change by itself;
+      # Dependabot can't see it here, so move it on by hand.
+      - run: npm install --global npm@11.21.0
+      # The release is staged, not published: nobody can install it until a maintainer approves it on npm with
+      # two-factor authentication. It's packed once, and the digest this run lists is that file's, for the maintainer to
+      # compare before approving.
+      - name: Stage the release on npm
+        run: |
+          name=$(node -p 'require("./package.json").name')
+          tarball=$(npm pack --json --pack-destination "$RUNNER_TEMP" | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8"))[0].filename')
+          digest="sha512-$(openssl dgst -sha512 -binary "$RUNNER_TEMP/$tarball" | base64 -w0)"
+          {
+            echo "Staging \`$tarball\` for approval: \`$digest\`"
+            echo
+            echo "Approve it from your computer: \`npm stage list $name\`, compare the digest, then \`npm stage approve <id>\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+          npm stage publish "$RUNNER_TEMP/$tarball" --provenance --access public

@@ -145,9 +145,16 @@ Every change that reaches the published plugin needs a changeset: run `npx chang
 
 1. Run `npm run release:version`, which turns the changesets into a new `version` in `package.json` and an entry in `CHANGELOG.md`, and puts the same version in the plugin's description in `src/index.ts`, which a test keeps the same. Commit what it changes. Every release needs a new version: npm never lets one be published twice.
 2. Publish a GitHub release whose tag is `v` and the version, such as `v0.1.2`.
-3. [`publish.yml`](.github/workflows/publish.yml) checks the plugin again and publishes it to npm with [provenance](https://docs.npmjs.com/generating-provenance-statements), which the Plugins screen shows owners: which repository and commit it was built from.
+3. [`publish.yml`](.github/workflows/publish.yml) checks the plugin again and stages it on npm with [provenance](https://docs.npmjs.com/generating-provenance-statements), which the Plugins screen shows owners: which repository and commit it was built from. A staged version isn't published: nobody can install it until a maintainer approves it. The run's page lists the digest of the file it staged.
+4. Approve it from your computer, with npm 11.15 or later (`npm install --global npm@11`), signed in to npm (`npm login`): `npm stage list goodfellow-plugin-s3` lists what's waiting, with each one's id and digest. Compare the digest with the run's, then run `npm stage approve <id>`, which asks for your two-factor code and publishes it. To throw a staged version away instead, run `npm stage reject <id>`.
 
-It publishes through npm's [trusted publishing](https://docs.npmjs.com/trusted-publishers), so the repository holds no npm token: set the package's trusted publisher on npmjs.com, in its settings, to this repository and `publish.yml`, once. The Plugins screen offers a release once it's three days old.
+The workflow signs in to npm with [trusted publishing](https://docs.npmjs.com/trusted-publishers), so the repository holds no npm token, and it may only stage versions, so nothing reaches npm without a maintainer's two-factor authentication. Set it up once, with npm 11.15 or later:
+
+```sh
+npm trust github goodfellow-plugin-s3 --file publish.yml --repo goodfellow-cms/goodfellow-plugin-s3 --allow-stage-publish --yes
+```
+
+Without `--allow-publish`, npm refuses `npm publish` from the workflow. A package has one trusted publisher: if it already has one that may publish, find its id with `npm trust list goodfellow-plugin-s3` and remove it first with `npm trust revoke --id <id> goodfellow-plugin-s3`. npm drops a trusted publisher that hasn't staged anything within 2 days of being added, so add it shortly before a release. Then choose **Require two-factor authentication and disallow tokens** under the package's **Settings → Publishing access**. The Plugins screen offers a release once it's three days old.
 
 `peerDependencies` names the Goodfellow releases it works with, as a range on `@goodfellow-cms/core` (`>=0.6.0 <1.0.0`). Goodfellow's Plugins screen offers a release only to sites on a Goodfellow release in that range, so narrow it in a new version if a Goodfellow release breaks the plugin. A caret range such as `^0.6.0` would mean 0.6 alone.
 
