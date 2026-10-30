@@ -1,14 +1,16 @@
-# Stages a release on npm, with npm's provenance, when a GitHub release is
-# published. A maintainer then approves it on npm, which publishes it, so nothing
-# reaches npm without their two-factor authentication. Provenance lets
+# Stages a release on npm, with npm's provenance, when a version's tag, such as
+# v1.2.3, is pushed. A maintainer then approves it on npm, which publishes it, so
+# nothing reaches npm without their two-factor authentication. Provenance lets
 # Goodfellow's Plugins screen say which repository it was built from. npm's
 # trusted publishing lets this workflow stage it without a token: set it up once,
 # for staged publishing only, as the README says.
 name: Publish
 
 on:
-  release:
-    types: [published]
+  push:
+    tags: ["v*"]
+  # For a tag whose push didn't start it: choose the tag under "Use workflow from".
+  workflow_dispatch:
 
 permissions: {}
 
@@ -22,14 +24,26 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The whole history, to check the tag is on main.
+          fetch-depth: 0
+      - name: Check the tag is a version's, on main
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          if [ "$GITHUB_REF_TYPE" != tag ] || [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::Run this for the tag v$version, not $GITHUB_REF_NAME."
+            exit 1
+          fi
+          # Only what was merged into main is released, never a tag on a branch nobody reviewed.
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME isn't on main. Tag a commit on main."
+            exit 1
+          fi
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           check-latest: true
           registry-url: https://registry.npmjs.org
       - run: npm ci
-      - name: Check the release's tag is the package's version
-        run: test "v$(node -p 'require("./package.json").version')" = "$GITHUB_REF_NAME"
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
