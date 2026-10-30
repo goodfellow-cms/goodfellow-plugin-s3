@@ -1,5 +1,14 @@
 # goodfellow-plugin-s3
 
+## 0.1.2
+
+### Patch Changes
+
+- b950c3a: Refuses media addresses that only look like they stay in the site's folder: `%2e%2e` (`..`), `%2f` (`/`), `%5c` (`\`), `%00` and other encoded control characters, and doubly encoded ones. Before, `/media/%2e%2e/escaped.txt` was signed as `escaped.txt` at the top of the bucket, and two of them could reach another bucket the keys could write to, so any signed-in editor of a full-stack site, or anyone who could start the site's CI, could have files written or deleted outside the site's folder. Addresses are now checked once decoded, and a signed address is refused unless it's exactly the one asked for, in the site's folder.
+- e2b892a: Releases are published to npm from GitHub Actions with npm's provenance, which Goodfellow's Plugins screen shows owners: which repository and commit a release was built from.
+- 141ff93: Signs uploads only for the kinds of file Goodfellow's media library takes, each with the type its address says, rather than the type the browser asks for, so no one with a signed address can put a page or a script at the bucket's address. SVGs are served to download when opened on their own, and still show in pages. A full-stack site's server signs deletes for the site's owners only, and the admin panel says when it refuses rather than asking the site's CI instead.
+- bcfb485: Uploads and deletes of more than 100 files at once are signed a hundred at a time, rather than refused. A full-stack site's server that fails to sign them is said, in words for the editor, rather than each upload quietly waiting a minute for the site's CI instead, and only a server without the keys leaves it to the CI. An upload whose connection drops, or that the storage is too busy for, is tried again, up to three times. Files are at most 5 MiB under 5 GiB, which Cloudflare R2 takes in one upload as well as S3.
+
 ## 0.1.1
 
 ### Patch Changes
