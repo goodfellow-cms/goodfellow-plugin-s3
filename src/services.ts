@@ -69,7 +69,7 @@ function bucketHost(bucket: string, host: string, path: string): string {
 }
 
 const CORS =
-  "allow PUT, DELETE and GET from any origin (*), with any headers, since the plugin's screen has no origin of its own.";
+  "allow PUT and DELETE from any origin (*), with the headers content-type, content-disposition and x-amz-acl, since the plugin's screen has no origin of its own.";
 
 export const SERVICES: readonly StorageService[] = [
   {

@@ -8,12 +8,13 @@ It needs Goodfellow 0.6 or later, with the starters' setup for plugins' tasks: `
 
 ## How it works
 
-- **Keys:** the bucket's keys are kept in the site's CI secrets, `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY` (GitHub Actions secrets, GitLab CI/CD variables or Bitbucket's secured Pipelines variables), never in the admin panel, an editor's browser or the site's files.
-- **Uploading:** the admin panel's Media screen hands each batch of files to the plugin, which runs in a sandboxed frame of its own. The plugin asks the site's CI to sign the uploads, with its `sign` task, which gets only those two secrets and takes about a minute. The task answers with an address for each file that works for an hour and only for putting that file, sealed so only that admin panel can read it, and the frame sends the files straight to the bucket. Then the admin panel publishes the list of files.
+- **Keys:** the bucket's keys are kept in the site's CI secrets, `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY` (GitHub Actions secrets, GitLab CI/CD variables or Bitbucket's secured Pipelines variables), never in the admin panel, an editor's browser or the site's files, beside `S3_BUCKET`, the bucket and folder they're for.
+- **Uploading:** the admin panel's Media screen hands each batch of files to the plugin, which runs in a sandboxed frame of its own. The plugin asks the site's CI to sign the uploads, with its `sign` task, which gets only those secrets and takes about a minute. The task answers with an address for each file that works for an hour and only for putting that file, sealed so only that admin panel can read it, and the frame sends the files straight to the bucket. Then the admin panel publishes the list of files.
 - **Full-stack sites** can keep the keys in their server's environment instead, which signs uploads straight away (see below).
 - **Moving the site's media:** once the plugin is set up, the Media screen offers to move the files already in the site's own files to the bucket, and to move them back (files up to 25 MB), in one publish each.
 - **Settings:** the service, the bucket, its region (or Cloudflare account) and the files' public address are in `content/s3-storage.json`, which holds no keys.
-- **What it signs:** only files in the site's folder of the bucket, at the media library's addresses, and only the kinds of file the media library takes (photos, documents, sound and video), each served as the type its name says, whatever the browser asks for. An SVG opened on its own is downloaded rather than shown, since an SVG can hold a script; pages show it as usual.
+- **What it signs:** only files in the bucket and folder `S3_BUCKET` names, at the media library's addresses, and only the kinds of file the media library takes (photos, documents, sound and video), each served as the type its name says, whatever the browser asks for, and at the size the admin panel said, up to about 5 GB. Editors can change the settings file, so the secret, which they can't, is what keeps the keys to the site's own files: settings naming another bucket or folder get nothing signed. An SVG opened on its own is downloaded rather than shown, since an SVG can hold a script; pages show it as usual. The plugin's frame checks that each signed address goes to the file it asked for before sending anything.
+- **Deleting:** removing a file from the Media screen deletes it from the bucket. On a full-stack site's server only owners can have deletes signed, but through the CI anyone who can edit the site can, for any file in the site's folder, since the CI can't see editors' limits. Turn on the bucket's versioning where the service has it (see below), so a deleted file can be brought back.
 
 ## Installing
 
@@ -65,6 +66,8 @@ The plugin's screen, **Site Settings → S3 storage**, walks through these steps
    - DigitalOcean Spaces and Akamai (Linode) Object Storage need nothing: the plugin makes each file it uploads readable by anyone.
    - Cloudflare R2 has no address until you turn one on: in the bucket's settings, turn on its `r2.dev` address or connect a domain, and copy the address it shows into **Public address**.
 
+   The public address can't be on the site's own domain, where a file could run as the site's pages do; a subdomain such as `media.example.org` is fine.
+
    **Use an address of my own** is for files shown from somewhere else, such as a domain of your own or a service that copies them closer to visitors (a CDN, such as CloudFront in front of Amazon S3). Leave it off if you're not sure.
 3. **Allow the admin panel's requests** in the bucket's CORS settings. The plugin's frame is sandboxed, so its requests come from no origin of their own, and the rule has to allow any (the screen has this to copy, under *Let the admin panel upload to the bucket*):
 
@@ -72,14 +75,14 @@ The plugin's screen, **Site Settings → S3 storage**, walks through these steps
    [
      {
        "AllowedOrigins": ["*"],
-       "AllowedMethods": ["PUT", "DELETE", "GET"],
-       "AllowedHeaders": ["*"],
+       "AllowedMethods": ["PUT", "DELETE"],
+       "AllowedHeaders": ["content-type", "content-disposition", "x-amz-acl"],
        "MaxAgeSeconds": 3600
      }
    ]
    ```
 
-   Requests are still signed, so only someone the site's CI signed for can change the bucket.
+   Requests are still signed, so only someone the site's CI signed for can change the bucket. Pages show files with images and players, which need no CORS rule.
 4. **Make keys for the site** that can only put and delete files in this bucket: on Cloudflare R2, an API token with *Object Read & Write* for the one bucket; on Amazon S3, an IAM user with a policy like this one:
 
    ```json
@@ -95,13 +98,14 @@ The plugin's screen, **Site Settings → S3 storage**, walks through these steps
    }
    ```
 
-5. **Add the keys to the site's secrets** as `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY`. The screen shows only the steps for this site, with a link to the page where they're added: on GitHub, the repository's **Settings → Secrets and variables → Actions → New repository secret**; on GitLab, **Settings → CI/CD → Variables**, masked and protected, since tasks run on the main branch; on Bitbucket, **Repository settings → Pipelines → Repository variables**, secured, with Pipelines turned on; on a full-stack site, the server's environment; in `goodfellow dev` and `next dev`, the site's `.env.local` (see below). The plugin's task gets only these two. On GitHub nothing else in the site's CI gets them; GitLab and Bitbucket give every job in the site's pipelines the variables, so keep only what the site needs there.
+   **Turn on versioning** where the service has it (Amazon S3, Backblaze B2, Google Cloud Storage and Wasabi, among others), so a file deleted from the Media screen, by mistake or by someone who shouldn't have, can be brought back: a delete then only hides the file, and keys like the ones above, without `s3:DeleteObjectVersion`, can't remove its old versions. A lifecycle rule can remove old versions after a while, so they don't cost more than they need to. Where the service has no versioning, keep a copy of the bucket elsewhere.
+5. **Add the keys to the site's secrets** as `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY`, with `S3_BUCKET`: the bucket's name, followed by a slash and the folder where the settings have one (`parish-media`, or `parish-media/site/`; the screen shows it). The screen shows only the steps for this site, with a link to the page where they're added: on GitHub, the repository's **Settings → Secrets and variables → Actions → New repository secret**; on GitLab, **Settings → CI/CD → Variables**, masked and protected, since tasks run on the main branch; on Bitbucket, **Repository settings → Pipelines → Repository variables**, secured, with Pipelines turned on; on a full-stack site, the server's environment; in `goodfellow dev` and `next dev`, the site's `.env.local` (see below). The plugin's task gets only these three. On GitHub nothing else in the site's CI gets them; GitLab and Bitbucket give every job in the site's pipelines the variables, so keep only what the site needs there.
 6. **Save** the settings. New uploads go to the bucket from then on. **Try the bucket** puts a small file and removes it, which checks the settings, the keys and the CORS settings together.
 7. On the **Media** screen, **Move … files to S3 storage** moves the files the site already has.
 
 ## Full-stack sites
 
-A full-stack Next.js site can sign uploads on its own server, straight away, rather than through its CI. Put `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY` in the server's environment and pass the plugin's server module to the API route:
+A full-stack Next.js site can sign uploads on its own server, straight away, rather than through its CI. Put `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` and `S3_BUCKET` in the server's environment and pass the plugin's server module to the API route:
 
 ```ts
 // app/api/goodfellow/[...path]/route.ts
@@ -125,6 +129,7 @@ The server signs uploads for every editor signed in, and deletes for the site's 
 # .env.local
 S3_ACCESS_KEY_ID=…
 S3_SECRET_ACCESS_KEY=…
+S3_BUCKET=…
 ```
 
 ## Removing it

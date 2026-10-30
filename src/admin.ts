@@ -6,10 +6,11 @@
  * task, about a minute), or a full-stack site's server does straight away,
  * and the frame sends files to the bucket at the signed addresses.
  */
-import { isSignedRequests, StorageError, sendSigned } from "./client.js";
+import { isSignedFor, isSignedRequests, StorageError, sendSigned } from "./client.js";
 import { isAnswer, type StorageService, servicesFrom } from "./services.js";
 import {
   MEDIA_STORAGE_FILE,
+  objectKey,
   parseSettings,
   parseStoredMedia,
   SETTINGS_FILE,
@@ -20,7 +21,16 @@ import {
   storedMediaText,
   tidySettings,
 } from "./settings.js";
-import { KEY_ID_SECRET, MAX_SIGNED, SECRET_KEY_SECRET, type SignedRequest, type SignInput } from "./signing.js";
+import {
+  BUCKET_SECRET,
+  CHECK_BODY,
+  CHECK_KEY,
+  KEY_ID_SECRET,
+  MAX_SIGNED,
+  SECRET_KEY_SECRET,
+  type SignedRequest,
+  type SignInput,
+} from "./signing.js";
 import type { PluginAdmin, PluginAdminApi, PluginMediaFile, PluginMediaReady } from "./types.js";
 
 /** How many files go to the bucket at once. */
@@ -51,8 +61,10 @@ export function reachable(endpoint: string, connect: readonly string[] = []): bo
   });
 }
 
-/** Why the storage can't take files now, in words for the editor, or nothing when it can. */
-async function notReady(api: PluginAdminApi): Promise<Exclude<PluginMediaReady, { ready: true }> | undefined> {
+/** The settings, or why the storage can't take files now, in words for the editor. */
+async function readySettings(
+  api: PluginAdminApi,
+): Promise<StorageSettings | Exclude<PluginMediaReady, { ready: true }>> {
   const { settings } = await loadSite(api);
   if (!settings) return { ready: false, message: "Its bucket hasn't been set up yet.", screen: "settings" };
   if (!reachable(settings.endpoint, api.plugin.permissions.connect)) {
@@ -62,13 +74,28 @@ async function notReady(api: PluginAdminApi): Promise<Exclude<PluginMediaReady, 
       screen: "settings",
     };
   }
-  return undefined;
+  return settings;
 }
 
-/** Throws, in words for the editor, where the storage can't take or remove files now. */
-async function ready(api: PluginAdminApi): Promise<void> {
-  const problem = await notReady(api);
-  if (problem) throw new StorageError(problem.message);
+/** The settings, or throws, in words for the editor, where the storage can't take or remove files now. */
+async function ready(api: PluginAdminApi): Promise<StorageSettings> {
+  const settings = await readySettings(api);
+  if ("ready" in settings) throw new StorageError(settings.message);
+  return settings;
+}
+
+/** A signed request, once it's checked to go to the object it's for. */
+function checked(
+  request: SignedRequest | undefined,
+  settings: StorageSettings,
+  method: SignedRequest["method"],
+  key: string,
+  what: string,
+): SignedRequest {
+  if (!request || !isSignedFor(request, settings, method, key)) {
+    throw new StorageError(`The ${what} wasn't signed for this bucket, so nothing was sent.`);
+  }
+  return request;
 }
 
 /** An answer's JSON, or `undefined` where it isn't any, such as a proxy's page. */
@@ -137,18 +164,23 @@ export async function uploadFiles(
   fetcher: typeof fetch = fetch,
 ): Promise<void> {
   if (files.length === 0) return;
-  await ready(api);
+  const settings = await ready(api);
+  const asked = (file: PluginMediaFile) => ({
+    address: file.address,
+    type: file.type || "application/octet-stream",
+    size: file.data.size,
+  });
+  const upload = (file: PluginMediaFile, request: SignedRequest | undefined) =>
+    checked(request, settings, "PUT", objectKey(settings, file.address), `upload of ${file.address}`);
   // More files than one request to sign holds are signed, and sent, a batch at a time.
   for (const batch of batches(files)) {
-    const requests = await signed(api, {
-      action: "upload",
-      files: batch.map(({ address, type }) => ({ address, type: type || "application/octet-stream" })),
-    });
+    const requests = await signed(api, { action: "upload", files: batch.map(asked) });
     const byAddress = new Map(requests.map((request) => [request.address, request]));
     await eachLimited(batch, async (file) => {
-      const request = byAddress.get(file.address);
-      if (request?.method !== "PUT") throw new StorageError(`The upload of ${file.address} wasn't signed.`);
-      await sendSigned(request, `keep ${file.address}`, file.data, fetcher);
+      const request = upload(file, byAddress.get(file.address));
+      // Tried again at a newly signed address, since a large upload may outlast the first.
+      const resign = async () => upload(file, (await signed(api, { action: "upload", files: [asked(file)] }))[0]);
+      await sendSigned(request, `keep ${file.address}`, file.data, fetcher, undefined, resign);
     });
   }
 }
@@ -160,11 +192,15 @@ export async function removeFiles(
   fetcher: typeof fetch = fetch,
 ): Promise<void> {
   if (addresses.length === 0) return;
-  await ready(api);
+  const settings = await ready(api);
   const failed: string[] = [];
   for (const batch of batches(addresses)) {
     const requests = await signed(api, { action: "remove", addresses: batch });
-    await eachLimited(requests, async (request) => {
+    const byAddress = new Map(requests.map((request) => [request.address, request]));
+    const removals = batch.map((address) =>
+      checked(byAddress.get(address), settings, "DELETE", objectKey(settings, address), `removal of ${address}`),
+    );
+    await eachLimited(removals, async (request) => {
       await sendSigned(request, `remove ${request.address}`, undefined, fetcher).catch(() => {
         failed.push(request.address ?? "");
       });
@@ -175,22 +211,69 @@ export async function removeFiles(
 
 /** Puts a small file and deletes it again, to try the settings, the site's keys and the bucket's CORS settings. */
 export async function checkBucket(api: PluginAdminApi, fetcher: typeof fetch = fetch): Promise<void> {
-  await ready(api);
+  const settings = await ready(api);
   const [put, remove] = await signed(api, { action: "check" });
-  if (put?.method !== "PUT" || remove?.method !== "DELETE") throw new StorageError("The test file wasn't signed.");
-  await sendSigned(put, "keep a test file", new Blob(["ok"], { type: "text/plain" }), fetcher);
-  await sendSigned(remove, "remove the test file", undefined, fetcher);
+  const key = `${settings.folder}${CHECK_KEY}`;
+  await sendSigned(
+    checked(put, settings, "PUT", key, "test file"),
+    "keep a test file",
+    new Blob([CHECK_BODY], { type: "text/plain" }),
+    fetcher,
+  );
+  await sendSigned(checked(remove, settings, "DELETE", key, "test file"), "remove the test file", undefined, fetcher);
 }
 
-/** The CORS rules buckets need, for the plugin's frame, which has no origin of its own. */
-const CORS_RULES = `[
+/**
+ * The CORS rules buckets need, for the plugin's frame, which has no origin of
+ * its own: only the requests it makes, with only the headers it sends.
+ * Pages show files with `<img>` and `<video>`, which need none.
+ */
+export const CORS_RULES = `[
   {
     "AllowedOrigins": ["*"],
-    "AllowedMethods": ["PUT", "DELETE", "GET"],
-    "AllowedHeaders": ["*"],
+    "AllowedMethods": ["PUT", "DELETE"],
+    "AllowedHeaders": ["content-type", "content-disposition", "x-amz-acl"],
     "MaxAgeSeconds": 3600
   }
 ]`;
+
+/** Whether two addresses are on the same host, by name. */
+function sameHost(a: string, b: string): boolean {
+  try {
+    return new URL(a).hostname.toLowerCase() === new URL(b).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
+/** The value of the `S3_BUCKET` secret for settings: the bucket, and its folder after a slash. */
+export function bucketSecretValue(settings: Pick<StorageSettings, "bucket" | "folder">): string {
+  return `${settings.bucket}${settings.folder ? `/${settings.folder}` : ""}`;
+}
+
+/**
+ * Why new settings would lose the site's stored files, or nothing: they must
+ * stay at the same public address, in the same service, bucket and folder,
+ * until they're moved back to the site.
+ */
+export function movesStoredFiles(
+  saved: StorageSettings | undefined,
+  next: StorageSettings,
+  stored: StoredMediaFile | undefined,
+  plugin: string,
+): string | undefined {
+  if (!stored || Object.keys(stored.files).length === 0) return undefined;
+  if (stored.plugin !== plugin) {
+    return "Another plugin keeps the site's media. Move it back to the site from the Media screen first.";
+  }
+  const moved =
+    stored.url !== next.publicUrl ||
+    (saved !== undefined &&
+      (saved.endpoint !== next.endpoint || saved.bucket !== next.bucket || saved.folder !== next.folder));
+  return moved
+    ? "The site already keeps files in this bucket and folder. Move them back to the site from the Media screen before using another bucket, folder or public address."
+    : undefined;
+}
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -200,6 +283,7 @@ function errorText(error: unknown): string {
 export function chosenSettings(
   service: StorageService | undefined,
   form: { location: string; bucket: string; folder: string; ownAddress: boolean; publicUrl: string },
+  siteUrl?: string,
 ): StorageSettings | string {
   if (!service) return "Choose the service the bucket is in.";
   const location = form.location.trim();
@@ -228,6 +312,10 @@ export function chosenSettings(
       : "The bucket's own address couldn't be worked out: give an address of your own.";
   }
   if (problems.length > 0) return "Those settings can't be used: check the service's details.";
+  // Files at the site's own address could run there as the site's pages do, with the editors' sign-in.
+  if (siteUrl && sameHost(settings.publicUrl, siteUrl)) {
+    return "The public address needs a domain of its own, not the site's: use one such as media.example.org.";
+  }
   // The bucket's own address, with the folder files go in.
   return own || !settings.folder
     ? settings
@@ -394,27 +482,23 @@ async function settingsScreen(element: { ownerDocument: unknown }, api: PluginAd
   const save = button(inUse ? "Save" : "Save and keep the site's media here");
   const saveStatus = status();
   run(save, saveStatus, async () => {
-    const next = chosenSettings(chosen(), {
-      location: location.value,
-      bucket: bucket.value,
-      folder: folder.value,
-      ownAddress: ownAddress.checked,
-      publicUrl: publicUrl.value,
-    });
+    const next = chosenSettings(
+      chosen(),
+      {
+        location: location.value,
+        bucket: bucket.value,
+        folder: folder.value,
+        ownAddress: ownAddress.checked,
+        publicUrl: publicUrl.value,
+      },
+      api.siteUrl,
+    );
     if (typeof next === "string") return next;
-    const { stored } = await loadSite(api);
-    if (stored && stored.plugin !== api.plugin.name && Object.keys(stored.files).length > 0) {
-      return "Another plugin keeps the site's media. Move it back to the site from the Media screen first.";
-    }
-    // A bucket other than the one keeping the site's files would lose them.
-    if (
-      stored &&
-      stored.plugin === api.plugin.name &&
-      Object.keys(stored.files).length > 0 &&
-      stored.url !== next.publicUrl
-    ) {
-      return "The site already keeps files at another public address. Move them back to the site from the Media screen before using another bucket, or keep the same public address.";
-    }
+    // Anywhere other than where the site's files are kept would lose them.
+    const current = await loadSite(api);
+    const moves = movesStoredFiles(current.settings, next, current.stored, api.plugin.name);
+    if (moves) return moves;
+    const { stored } = current;
     const { published } = await api.publish(
       [
         { path: SETTINGS_FILE, text: settingsText(next) },
@@ -463,9 +547,20 @@ async function settingsScreen(element: { ownerDocument: unknown }, api: PluginAd
     keysBody.replaceChildren();
     keysBody.append(
       h("p", {
-        text: `The bucket's keys never go into the admin panel: the site keeps them as ${KEY_ID_SECRET} and ${SECRET_KEY_SECRET}, and signs each upload with them.`,
+        text: `The bucket's keys never go into the admin panel: the site keeps them as ${KEY_ID_SECRET} and ${SECRET_KEY_SECRET}, and signs each upload with them. It also keeps ${BUCKET_SECRET}, the bucket and folder the keys are for, and signs nothing anywhere else, even if these settings change.`,
       }),
     );
+    if (bucket.value.trim()) {
+      const typed = folder.value.trim().replace(/^\/+/, "");
+      const value = bucketSecretValue({
+        bucket: bucket.value.trim(),
+        folder: typed && !typed.endsWith("/") ? `${typed}/` : typed,
+      });
+      keysBody.append(
+        h("p", { text: `For these settings, ${BUCKET_SECRET} is:` }),
+        h("pre", {}, h("code", { text: value })),
+      );
+    }
     if (service) {
       keysBody.append(
         h("h3", { text: `1. Make the keys in ${service.name}` }),
@@ -530,6 +625,8 @@ async function settingsScreen(element: { ownerDocument: unknown }, api: PluginAd
     checkStatus,
   );
 
+  bucket.addEventListener("change", showKeys);
+  folder.addEventListener("change", showKeys);
   showService();
   showKeys();
   root.append(heading, intro, where, keys);
@@ -539,7 +636,8 @@ export default {
   screens: { settings: settingsScreen },
   media: {
     async ready(api) {
-      return (await notReady(api)) ?? { ready: true };
+      const settings = await readySettings(api);
+      return "ready" in settings ? settings : { ready: true };
     },
     upload: (files, api) => uploadFiles(api, files),
     remove: (addresses, api) => removeFiles(api, addresses),

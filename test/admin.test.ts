@@ -2,7 +2,15 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import admin, { checkBucket, chosenSettings, reachable, signed } from "../src/admin.js";
+import admin, {
+  bucketSecretValue,
+  CORS_RULES,
+  checkBucket,
+  chosenSettings,
+  movesStoredFiles,
+  reachable,
+  signed,
+} from "../src/admin.js";
 import plugin, { SERVICES, s3 } from "../src/index.js";
 import { servicesFrom } from "../src/services.js";
 import { MEDIA_STORAGE_FILE, SETTINGS_FILE, settingsText } from "../src/settings.js";
@@ -22,7 +30,7 @@ const settings = {
   folder: "",
   publicUrl: "https://media.example.org",
 };
-const secrets = { S3_ACCESS_KEY_ID: "KEY", S3_SECRET_ACCESS_KEY: "SECRET" };
+const secrets = { S3_ACCESS_KEY_ID: "KEY", S3_SECRET_ACCESS_KEY: "SECRET", S3_BUCKET: "parish-media" };
 
 /**
  * The admin panel's side, as a plugin's frame sees it, with files in memory
@@ -112,8 +120,8 @@ describe("media storage in the admin panel", () => {
       {
         action: "upload",
         files: [
-          { address: "/media/sermon.mp4", type: "video/mp4" },
-          { address: "/media/choir.jpg", type: "image/jpeg" },
+          { address: "/media/sermon.mp4", type: "video/mp4", size: 5 },
+          { address: "/media/choir.jpg", type: "image/jpeg", size: 5 },
         ],
       },
     ]);
@@ -152,6 +160,50 @@ describe("media storage in the admin panel", () => {
     await expect(
       media.upload([{ address: "/media/a.jpg", type: "image/jpeg", size: 1, data: new Blob(["x"]) }], unset.api),
     ).rejects.toThrow(/set up/);
+  });
+
+  it("says when the site's secrets don't name the bucket, or name another", async () => {
+    const { api } = await site(configured, { secrets: { S3_ACCESS_KEY_ID: "KEY", S3_SECRET_ACCESS_KEY: "SECRET" } });
+    await expect(signed(api, { action: "check" })).rejects.toThrow(/add S3_BUCKET/);
+    const other = await site(configured, { secrets: { ...secrets, S3_BUCKET: "other-bucket" } });
+    await expect(signed(other.api, { action: "check" })).rejects.toThrow(/somewhere other than the bucket/);
+  });
+
+  it("sends nothing to an address it wasn't signed for", async () => {
+    const s3 = fakeS3({ keys: { KEY: "SECRET" } });
+    const sent: string[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      sent.push(String(input));
+      return s3.fetch(input, init);
+    });
+    const requests = [
+      {
+        method: "PUT",
+        address: "/media/a.jpg",
+        url: "https://attacker.example/parish-media/a.jpg?X-Amz-Signature=x",
+        headers: {},
+      },
+    ];
+    const { api } = await site(configured, {
+      server: () => ({ status: 200, body: JSON.stringify({ requests }) }),
+    });
+    await expect(
+      media.upload([{ address: "/media/a.jpg", type: "image/jpeg", size: 1, data: new Blob(["x"]) }], api),
+    ).rejects.toThrow(/wasn't signed for this bucket/);
+    // Nor a removal of another file than was asked for.
+    const removals = [
+      {
+        method: "DELETE",
+        address: "/media/a.jpg",
+        url: "https://account.r2.cloudflarestorage.com/parish-media/b.jpg",
+        headers: {},
+      },
+    ];
+    const other = await site(configured, {
+      server: () => ({ status: 200, body: JSON.stringify({ requests: removals }) }),
+    });
+    await expect(media.remove(["/media/a.jpg"], other.api)).rejects.toThrow(/wasn't signed for this bucket/);
+    expect(sent).toEqual([]);
   });
 
   it("tries the bucket with a test file it removes again", async () => {
@@ -255,6 +307,59 @@ describe("choosing where files are kept", () => {
     expect(chosenSettings(undefined, form)).toMatch(/Choose the service/);
   });
 
+  it("keeps the public address off the site's own domain, where files would run as its pages", () => {
+    const r2 = service("r2");
+    const chosen = { ...form, location: "0123456789abcdef0123456789abcdef", ownAddress: true };
+    expect(
+      chosenSettings(r2, { ...chosen, publicUrl: "https://parish.example/media" }, "https://parish.example"),
+    ).toMatch(/domain of its own/);
+    expect(chosenSettings(r2, { ...chosen, publicUrl: "https://PARISH.example" }, "https://parish.example/")).toMatch(
+      /domain of its own/,
+    );
+    expect(
+      chosenSettings(r2, { ...chosen, publicUrl: "https://media.parish.example" }, "https://parish.example"),
+    ).toMatchObject({ publicUrl: "https://media.parish.example" });
+  });
+
+  it("won't move the site's stored files away by changing where they're kept", () => {
+    const saved = { ...settings, folder: "site/" };
+    const stored = {
+      version: 1 as const,
+      plugin: plugin.name,
+      url: saved.publicUrl,
+      files: { "/media/a.jpg": { size: 1 } },
+    };
+    expect(movesStoredFiles(saved, saved, stored, plugin.name)).toBeUndefined();
+    for (const next of [
+      { ...saved, bucket: "other-bucket" },
+      { ...saved, folder: "" },
+      { ...saved, endpoint: "https://other.r2.cloudflarestorage.com" },
+      { ...saved, publicUrl: "https://elsewhere.example.org" },
+    ]) {
+      expect(movesStoredFiles(saved, next, stored, plugin.name), JSON.stringify(next)).toMatch(/Move them back/);
+    }
+    expect(movesStoredFiles(saved, saved, { ...stored, plugin: "goodfellow-plugin-other" }, plugin.name)).toMatch(
+      /Another plugin/,
+    );
+    // Without files kept there yet, anything goes.
+    expect(movesStoredFiles(saved, { ...saved, bucket: "other-bucket" }, { ...stored, files: {} }, plugin.name)).toBe(
+      undefined,
+    );
+  });
+
+  it("says what the bucket's secret is, and asks the bucket to allow only the frame's requests", () => {
+    expect(bucketSecretValue({ bucket: "parish-media", folder: "" })).toBe("parish-media");
+    expect(bucketSecretValue({ bucket: "parish-media", folder: "site/" })).toBe("parish-media/site/");
+    expect(JSON.parse(CORS_RULES)).toEqual([
+      {
+        AllowedOrigins: ["*"],
+        AllowedMethods: ["PUT", "DELETE"],
+        AllowedHeaders: ["content-type", "content-disposition", "x-amz-acl"],
+        MaxAgeSeconds: 3600,
+      },
+    ]);
+  });
+
   it("offers services a site's config adds, and lets its screen reach them", () => {
     const options = {
       services: [
@@ -282,7 +387,7 @@ describe("choosing where files are kept", () => {
 describe("the plugin", () => {
   it("asks for its settings, its keys in the site's secrets, and a task to sign with them", () => {
     expect(plugin.permissions?.files).toEqual([SETTINGS_FILE, MEDIA_STORAGE_FILE]);
-    expect(plugin.permissions?.secrets).toEqual(["S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"]);
+    expect(plugin.permissions?.secrets).toEqual(["S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY", "S3_BUCKET"]);
     expect(plugin.permissions?.read).toEqual([SETTINGS_FILE]);
     expect(plugin.tasks?.map((task) => [task.id, task.module])).toEqual([["sign", "goodfellow-plugin-s3/sign"]]);
     expect(plugin.server).toBe("goodfellow-plugin-s3/server");

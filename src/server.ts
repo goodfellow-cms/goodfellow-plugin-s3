@@ -1,13 +1,14 @@
 /**
  * The plugin's server module, for full-stack sites whose server keeps the
- * keys (`S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY` in its environment):
- * it signs uploads straight away, rather than through the site's CI. Without
- * the keys it says so, and the admin module uses the CI's task instead.
+ * keys (`S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` and `S3_BUCKET` in its
+ * environment): it signs uploads straight away, rather than through the
+ * site's CI. Without the keys it says so, and the admin module uses the CI's
+ * task instead.
  */
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseSettings, SETTINGS_FILE } from "./settings.js";
-import { credentialsFrom, signInput, signRequests } from "./signing.js";
+import { keysFrom, signInput, signRequests } from "./signing.js";
 import type { PluginServerContext } from "./types.js";
 
 const json = (status: number, body: unknown) =>
@@ -25,8 +26,8 @@ export function s3Server(options: { root?: string; env?: Record<string, string |
     if (context.path !== "sign") return json(404, { error: "not-found" });
     if (request.method !== "POST") return json(405, { error: "method-not-allowed" });
     if (!context.editor) return json(401, { error: "signed-out" });
-    const credentials = credentialsFrom(options.env ?? process.env);
-    if (!credentials) return json(404, { error: "no-keys" });
+    const keys = keysFrom(options.env ?? process.env);
+    if (!keys.credentials) return json(404, { error: "no-keys" });
     const root = options.root ?? process.cwd();
     const settings = parseSettings(await readFile(join(root, SETTINGS_FILE), "utf8").catch(() => undefined));
     try {
@@ -39,7 +40,7 @@ export function s3Server(options: { root?: string; env?: Record<string, string |
           message: "Only the site's owners can delete files kept in S3 storage.",
         });
       }
-      return json(200, { requests: await signRequests(input, settings, credentials) });
+      return json(200, { requests: await signRequests(input, settings, keys) });
     } catch (error) {
       return json(400, { error: "not-signed", message: error instanceof Error ? error.message : String(error) });
     }
