@@ -1,6 +1,6 @@
 {
   "name": "goodfellow-plugin-s3",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Keeps a Goodfellow site's media in any S3-compatible storage, such as Amazon S3, Cloudflare R2 or Backblaze B2, instead of the site's repository.",
   "keywords": [
     "goodfellow-plugin",
