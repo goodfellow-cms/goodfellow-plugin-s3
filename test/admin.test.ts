@@ -39,7 +39,12 @@ const secrets = { S3_ACCESS_KEY_ID: "KEY", S3_SECRET_ACCESS_KEY: "SECRET", S3_BU
  */
 async function fakeApi(
   files: Record<string, string>,
-  options: { secrets?: Record<string, string>; server?: (body: string) => { status: number; body: string } } = {},
+  options: {
+    secrets?: Record<string, string>;
+    server?: (body: string) => { status: number; body: string };
+    /** The plugin's description names its server module, but the site has none, as on every static site. */
+    noServer?: boolean;
+  } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "s3-site-"));
   await mkdir(join(root, "content"));
@@ -51,7 +56,7 @@ async function fakeApi(
       title: plugin.title,
       id: plugin.name,
       permissions: plugin.permissions ?? {},
-      ...(options.server && { server: true }),
+      ...((options.server || options.noServer) && { server: true }),
     },
     siteUrl: "https://parish.example",
     read: async (paths) => Object.fromEntries(paths.map((path) => [path, files[path] ?? null])),
@@ -225,6 +230,12 @@ describe("media storage in the admin panel", () => {
     keys = false;
     await checkBucket(api, s3.fetch);
     expect(tasks).toEqual([{ action: "check" }]);
+  });
+
+  it("asks the CI on a site with no server, where the plugin still says it has a server module", async () => {
+    const { api, tasks } = await site(configured, { noServer: true });
+    expect(await signed(api, { action: "remove", addresses: [] })).toEqual([]);
+    expect(tasks).toEqual([{ action: "remove", addresses: [] }]);
   });
 
   it("says what a full-stack site's server refused, rather than asking the CI instead", async () => {

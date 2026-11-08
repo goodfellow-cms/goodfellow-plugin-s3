@@ -111,7 +111,9 @@ function parsed(text: string): Record<string, unknown> | undefined {
 /**
  * Has requests signed where the keys are: a full-stack site's server, where
  * it has them, straight away, or else the site's CI, through the `sign` task.
- * Only a server without the keys (404) leaves it to the CI: anything else it
+ * A site with no server (the admin panel refuses the request, as on every
+ * static site, whose description still names the plugin's server module) and
+ * a server without the keys (404) leave it to the CI: anything else a server
  * answers is said, rather than costing each upload a minute without a word.
  */
 export async function signed(api: PluginAdminApi, input: SignInput): Promise<SignedRequest[]> {
@@ -119,26 +121,37 @@ export async function signed(api: PluginAdminApi, input: SignInput): Promise<Sig
     const answer = await api
       .server("sign", { method: "POST", body: JSON.stringify(input), headers: { "content-type": "application/json" } })
       .catch(() => undefined);
-    if (!answer) throw new StorageError("The site's server couldn't be reached to sign the upload. Try again.");
-    const body = parsed(answer.body);
-    if (answer.status === 200) {
-      if (isSignedRequests(body?.requests)) return body.requests;
-      throw new StorageError("The site's server didn't answer with signed addresses for the upload.");
-    }
-    if (answer.status === 401) throw new StorageError("You've been signed out. Sign in again, then try again.");
-    if (answer.status !== 404) {
-      const message = body?.message;
-      throw new StorageError(
-        typeof message === "string"
-          ? message
-          : `The site's server didn't sign the upload (${answer.status}). A developer can find out why in its logs.`,
-      );
-    }
-    // Without keys of its own, the server leaves it to the CI.
+    // Without an answer, there's no server here to ask: the CI signs it, and says so if it can't either.
+    const requests = answer && fromServer(answer);
+    if (requests) return requests;
   }
+  return fromTask(api, input);
+}
+
+async function fromTask(api: PluginAdminApi, input: SignInput): Promise<SignedRequest[]> {
   const requests = await api.task("sign", input);
   if (!isSignedRequests(requests)) throw new StorageError("The site's build service didn't sign the upload.");
   return requests;
+}
+
+/** The server's signed requests, or `undefined` where it has no keys of its own and leaves it to the CI. */
+function fromServer(answer: { status: number; body: string }): SignedRequest[] | undefined {
+  const body = parsed(answer.body);
+  if (answer.status === 200) {
+    if (isSignedRequests(body?.requests)) return body.requests;
+    throw new StorageError("The site's server didn't answer with signed addresses for the upload.");
+  }
+  if (answer.status === 401) throw new StorageError("You've been signed out. Sign in again, then try again.");
+  if (answer.status !== 404) {
+    const message = body?.message;
+    throw new StorageError(
+      typeof message === "string"
+        ? message
+        : `The site's server didn't sign the upload (${answer.status}). A developer can find out why in its logs.`,
+    );
+  }
+  // Without keys of its own, the server leaves it to the CI.
+  return undefined;
 }
 
 /** Lists in pieces of at most `MAX_SIGNED`, as many as one request to sign may hold. */
