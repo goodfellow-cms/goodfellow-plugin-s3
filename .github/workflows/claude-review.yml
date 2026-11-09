@@ -1,0 +1,140 @@
+# Claude reviews a pull request with Claude Code's /code-review, posting what it finds as comments on the lines.
+#
+# - Once CI has passed: CI's claude-review job calls this after its other jobs succeed, the first time they do
+#   on a pull request that's ready for review. It then labels the pull request claude-reviewed, so later pushes
+#   aren't reviewed again by themselves.
+# - On request: a comment starting "@claude review" from someone who can push here reviews the pull request as it
+#   is now, at the level the comment names, such as "@claude review high".
+# - Labels: no-claude-review skips the review CI would start, and claude-review:low (or :high or :xhigh) sets its
+#   level, which is medium otherwise. A level in a comment wins over the label.
+#
+# It runs on the Claude subscription of whoever made the CLAUDE_CODE_OAUTH_TOKEN secret (`claude setup-token`),
+# and does nothing until there is one. It reads the pull request and runs none of its code. Pull requests from
+# forks are never reviewed, since GitHub gives their runs no secrets. A review that fails, such as when the plan's
+# limit is reached, never fails CI: the comment it leaves says so. Each review's comment says what it used.
+name: Claude review
+
+on:
+  workflow_call:
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: false
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  review:
+    if: >-
+      (github.event_name == 'pull_request'
+        && github.event.pull_request.head.repo.full_name == github.repository
+        && !github.event.pull_request.draft
+        && !contains(github.event.pull_request.labels.*.name, 'no-claude-review')
+        && !contains(github.event.pull_request.labels.*.name, 'claude-reviewed'))
+      || (github.event_name == 'issue_comment'
+        && github.event.issue.pull_request
+        && startsWith(github.event.comment.body, '@claude review')
+        && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    concurrency:
+      group: claude-review-${{ github.event.pull_request.number || github.event.issue.number }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      PR: ${{ github.event.pull_request.number || github.event.issue.number }}
+    steps:
+      - name: Choose what to review
+        id: choose
+        env:
+          HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+          COMMENT: ${{ github.event.comment.body }}
+        run: |
+          if [ "$HAS_TOKEN" != "true" ]; then
+            echo "::notice::No CLAUDE_CODE_OAUTH_TOKEN secret, so no review."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          pr=$(gh pr view "$PR" --json isCrossRepository,headRefOid,labels)
+          if [ "$(jq -r .isCrossRepository <<<"$pr")" = "true" ]; then
+            echo "::notice::Pull requests from forks aren't reviewed."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          levels="low medium high xhigh"
+          level=medium
+          for label in $(jq -r '.labels[].name' <<<"$pr"); do
+            case "$label" in claude-review:*) wanted=${label#claude-review:} ;; *) continue ;; esac
+            [[ " $levels " == *" $wanted "* ]] && level=$wanted
+          done
+          # The first word after "@claude review", where it's a level.
+          wanted=$(sed -n '1s/^@claude review[[:space:]]*\([a-z]*\).*/\1/p' <<<"$COMMENT")
+          [ -n "$wanted" ] && [[ " $levels " == *" $wanted "* ]] && level=$wanted
+          {
+            echo "run=true"
+            echo "level=$level"
+            echo "sha=$(jq -r .headRefOid <<<"$pr")"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.choose.outputs.run == 'true'
+        with:
+          ref: ${{ steps.choose.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Review
+        id: claude
+        if: steps.choose.outputs.run == 'true'
+        continue-on-error: true
+        uses: anthropics/claude-code-action@c0949c50a78c1ec8ce2647db36629b870e715d0c # v1.0.268
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          prompt: /code-review ${{ steps.choose.outputs.level }} --comment ${{ env.PR }}
+          # Only what reading and commenting need: no editing, and no commands but reading the pull request and git.
+          claude_args: >-
+            --model opus
+            --allowedTools "Agent,Read,Glob,Grep,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*),mcp__github_inline_comment__create_inline_comment"
+
+      - name: Remember the first review
+        if: steps.choose.outputs.run == 'true' && steps.claude.outcome == 'success' && github.event_name == 'pull_request'
+        run: |
+          gh label create claude-reviewed --color ededed --description "Claude has reviewed it; comment @claude review for another" 2> /dev/null || true
+          gh pr edit "$PR" --add-label claude-reviewed
+
+      - name: Say what it used
+        if: steps.choose.outputs.run == 'true'
+        env:
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+          OUTCOME: ${{ steps.claude.outcome }}
+          LEVEL: ${{ steps.choose.outputs.level }}
+          SHA: ${{ steps.choose.outputs.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          result='{}'
+          if [ -n "$EXECUTION_FILE" ] && [ -f "$EXECUTION_FILE" ]; then
+            result=$(jq -c '[.[] | select(.type == "result")] | last // {}' "$EXECUTION_FILE")
+          fi
+          # Tokens across every model the review used, its subagents' included, and Claude Code's estimate of what
+          # they'd cost at API prices, which compares reviews with each other; on a subscription, nothing is billed.
+          usage=$(jq -r '
+            (.modelUsage // {}) as $m
+            | if ($m | length) == 0 then "Claude Code reported no usage."
+              else
+                ([$m[] | (.inputTokens // 0) + (.cacheReadInputTokens // 0) + (.cacheCreationInputTokens // 0)] | add) as $in
+                | ([$m[] | .outputTokens // 0] | add) as $out
+                | "\($in) tokens read, \($out) written, by \($m | keys | join(", ")); about $\(.total_cost_usd // 0 | . * 100 | round / 100) at API prices; \(.num_turns // 0) turns in \((.duration_ms // 0) / 60000 | round) min."
+              end' <<<"$result")
+          short=${SHA:0:7}
+          if [ "$OUTCOME" = "success" ]; then
+            body="Claude reviewed $short at **$LEVEL**. What it found is in comments on the lines; none means it found nothing to raise."
+          else
+            body="Claude couldn't review $short at **$LEVEL** ([the run]($RUN_URL) says why). Comment \`@claude review\` to try again."
+          fi
+          printf '%s\n\n%s\n' "$body" "Usage: $usage" | tee -a "$GITHUB_STEP_SUMMARY" | gh pr comment "$PR" --body-file -
