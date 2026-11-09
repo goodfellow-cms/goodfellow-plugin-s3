@@ -6,7 +6,8 @@
 # - On request: adding the claude-review label reviews the pull request as it is now, and the label is taken off
 #   again afterwards, ready to add another time. Adding claude-review:low (or :high or :xhigh) does the same at
 #   that level. Labels, unlike comments, run this as the pull request's own workflow, without the rights of this
-#   repository's main branch, and only people who can triage here can add them.
+#   repository's main branch. People who can triage can add labels, but only a label from someone who can push
+#   here starts a review, since each one uses the subscription.
 # - Levels: claude-review:low, :high, or :xhigh on the pull request sets the level of every review of it, which is
 #   medium otherwise, and no-claude-review skips the review CI would start.
 #
@@ -55,11 +56,20 @@ jobs:
           HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
           ADDED: ${{ github.event.label.name }}
           EVENT_ACTION: ${{ github.event.action }}
+          ACTOR: ${{ github.event.sender.login }}
         run: |
           if [ "$HAS_TOKEN" != "true" ]; then
             echo "::notice::No CLAUDE_CODE_OAUTH_TOKEN secret, so no review."
             echo "run=false" >> "$GITHUB_OUTPUT"
             exit 0
+          fi
+          if [ "$EVENT_ACTION" = "labeled" ]; then
+            permission=$(gh api "repos/$GH_REPO/collaborators/$ACTOR/permission" --jq .permission)
+            case "$permission" in admin | maintain | write) ;; *)
+              echo "::notice::$ACTOR can't push here, so their label doesn't start a review."
+              echo "run=false" >> "$GITHUB_OUTPUT"
+              exit 0 ;;
+            esac
           fi
           pr=$(gh pr view "$PR" --json headRefOid,labels)
           # The event's labels are as they were when it fired: a review that ran meanwhile, such as for an earlier
