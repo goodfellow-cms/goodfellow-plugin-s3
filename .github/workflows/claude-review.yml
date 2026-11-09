@@ -3,10 +3,12 @@
 # - Once CI has passed: CI's claude-review job calls this after its other jobs succeed, the first time they do
 #   on a pull request that's ready for review. It then labels the pull request claude-reviewed, so later pushes
 #   aren't reviewed again by themselves.
-# - On request: a comment starting "@claude review" from someone who can push here reviews the pull request as it
-#   is now, at the level the comment names, such as "@claude review high".
-# - Labels: no-claude-review skips the review CI would start, and claude-review:low (or :high or :xhigh) sets its
-#   level, which is medium otherwise. A level in a comment wins over the label.
+# - On request: adding the claude-review label reviews the pull request as it is now, and the label is taken off
+#   again afterwards, ready to add another time. Adding claude-review:low (or :high or :xhigh) does the same at
+#   that level. Labels, unlike comments, run this as the pull request's own workflow, without the rights of this
+#   repository's main branch, and only people who can triage here can add them.
+# - Levels: claude-review:low, :high, or :xhigh on the pull request sets the level of every review of it, which is
+#   medium otherwise, and no-claude-review skips the review CI would start.
 #
 # It runs on the Claude subscription of whoever made the CLAUDE_CODE_OAUTH_TOKEN secret (`claude setup-token`),
 # and does nothing until there is one. It reads the pull request and runs none of its code. Pull requests from
@@ -19,23 +21,21 @@ on:
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: false
-  issue_comment:
-    types: [created]
+  pull_request:
+    types: [labeled]
 
 permissions: {}
 
 jobs:
   review:
     if: >-
-      (github.event_name == 'pull_request'
-        && github.event.pull_request.head.repo.full_name == github.repository
-        && !github.event.pull_request.draft
-        && !contains(github.event.pull_request.labels.*.name, 'no-claude-review')
-        && !contains(github.event.pull_request.labels.*.name, 'claude-reviewed'))
-      || (github.event_name == 'issue_comment'
-        && github.event.issue.pull_request
-        && startsWith(github.event.comment.body, '@claude review')
-        && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
+      github.event.pull_request.head.repo.full_name == github.repository
+      && ((github.event.action == 'labeled'
+          && (github.event.label.name == 'claude-review' || startsWith(github.event.label.name, 'claude-review:')))
+        || (github.event.action != 'labeled'
+          && !github.event.pull_request.draft
+          && !contains(github.event.pull_request.labels.*.name, 'no-claude-review')
+          && !contains(github.event.pull_request.labels.*.name, 'claude-reviewed')))
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -43,38 +43,31 @@ jobs:
       pull-requests: write
       issues: write
     concurrency:
-      group: claude-review-${{ github.event.pull_request.number || github.event.issue.number }}
+      group: claude-review-${{ github.event.pull_request.number }}
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      PR: ${{ github.event.pull_request.number || github.event.issue.number }}
+      PR: ${{ github.event.pull_request.number }}
     steps:
       - name: Choose what to review
         id: choose
         env:
           HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
-          COMMENT: ${{ github.event.comment.body }}
+          ADDED: ${{ github.event.label.name }}
         run: |
           if [ "$HAS_TOKEN" != "true" ]; then
             echo "::notice::No CLAUDE_CODE_OAUTH_TOKEN secret, so no review."
             echo "run=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          pr=$(gh pr view "$PR" --json isCrossRepository,headRefOid,labels)
-          if [ "$(jq -r .isCrossRepository <<<"$pr")" = "true" ]; then
-            echo "::notice::Pull requests from forks aren't reviewed."
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          pr=$(gh pr view "$PR" --json headRefOid,labels)
           levels="low medium high xhigh"
           level=medium
-          for label in $(jq -r '.labels[].name' <<<"$pr"); do
+          # A level label on the pull request, and then the one just added, which wins.
+          for label in $(jq -r '.labels[].name' <<<"$pr") "$ADDED"; do
             case "$label" in claude-review:*) wanted=${label#claude-review:} ;; *) continue ;; esac
             [[ " $levels " == *" $wanted "* ]] && level=$wanted
           done
-          # The first word after "@claude review", where it's a level.
-          wanted=$(sed -n '1s/^@claude review[[:space:]]*\([a-z]*\).*/\1/p' <<<"$COMMENT")
-          [ -n "$wanted" ] && [[ " $levels " == *" $wanted "* ]] && level=$wanted
           {
             echo "run=true"
             echo "level=$level"
@@ -102,11 +95,15 @@ jobs:
             --model opus
             --allowedTools "Agent,Read,Glob,Grep,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*),mcp__github_inline_comment__create_inline_comment"
 
-      - name: Remember the first review
-        if: steps.choose.outputs.run == 'true' && steps.claude.outcome == 'success' && github.event_name == 'pull_request'
+      - name: Remember the review
+        if: steps.choose.outputs.run == 'true' && steps.claude.outcome == 'success'
         run: |
-          gh label create claude-reviewed --color ededed --description "Claude has reviewed it; comment @claude review for another" 2> /dev/null || true
+          gh label create claude-reviewed --color ededed --description "Claude has reviewed it; add claude-review for another review" 2> /dev/null || true
           gh pr edit "$PR" --add-label claude-reviewed
+
+      - name: Take the request off
+        if: always() && github.event.action == 'labeled' && github.event.label.name == 'claude-review'
+        run: gh pr edit "$PR" --remove-label claude-review
 
       - name: Say what it used
         if: steps.choose.outputs.run == 'true'
@@ -135,6 +132,6 @@ jobs:
           if [ "$OUTCOME" = "success" ]; then
             body="Claude reviewed $short at **$LEVEL**. What it found is in comments on the lines; none means it found nothing to raise."
           else
-            body="Claude couldn't review $short at **$LEVEL** ([the run]($RUN_URL) says why). Comment \`@claude review\` to try again."
+            body="Claude couldn't review $short at **$LEVEL** ([the run]($RUN_URL) says why). Add the \`claude-review\` label to try again."
           fi
           printf '%s\n\n%s\n' "$body" "Usage: $usage" | tee -a "$GITHUB_STEP_SUMMARY" | gh pr comment "$PR" --body-file -
