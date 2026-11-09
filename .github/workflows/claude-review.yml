@@ -5,9 +5,10 @@
 #   aren't reviewed again by themselves.
 # - On request: adding the claude-review label reviews the pull request as it is now, and the label is taken off
 #   again afterwards, ready to add another time. Adding claude-review:low (or :high or :xhigh) does the same at
-#   that level. Labels, unlike comments, run this as the pull request's own workflow, without the rights of this
-#   repository's main branch. People who can triage can add labels, but only a label from someone who can push
-#   here starts a review, since each one uses the subscription.
+#   that level, taking off any other level label. A label runs the pull request's own workflow, which gets this
+#   repository's secrets only for a branch here, whose author can already push here; a comment would run the main
+#   branch's workflow over the pull request's code. People who can triage can add labels, but only a label from
+#   someone who can push here starts a review, since each one uses the subscription.
 # - Levels: claude-review:low, :high, or :xhigh on the pull request sets the level of every review of it, which is
 #   medium otherwise, and no-claude-review skips the review CI would start.
 #
@@ -120,9 +121,19 @@ jobs:
           gh label create claude-reviewed --color ededed --description "Claude has reviewed it; add claude-review for another review" 2> /dev/null || true
           gh pr edit "$PR" --add-label claude-reviewed
 
+      # The plain request comes off, ready to add again; a level label stays, the only one of its kind.
       - name: Take the request off
-        if: always() && github.event.action == 'labeled' && github.event.label.name == 'claude-review'
-        run: gh pr edit "$PR" --remove-label claude-review
+        if: always() && github.event.action == 'labeled' && steps.choose.outputs.run == 'true'
+        env:
+          ADDED: ${{ github.event.label.name }}
+        run: |
+          if [ "$ADDED" = "claude-review" ]; then
+            gh pr edit "$PR" --remove-label claude-review
+          else
+            for label in $(gh pr view "$PR" --json labels --jq '.labels[].name'); do
+              if [[ "$label" == claude-review:* && "$label" != "$ADDED" ]]; then gh pr edit "$PR" --remove-label "$label"; fi
+            done
+          fi
 
       - name: Say what it used
         if: steps.choose.outputs.run == 'true'
