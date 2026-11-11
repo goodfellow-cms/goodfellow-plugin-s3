@@ -57,7 +57,7 @@ plugins: [
 ],
 ```
 
-Its `S3_BUCKET` secret then starts with the service's address, such as `https://minio.example.org/parish-media/site/`, which the settings screen shows: the signer can't tell a service it doesn't know from the settings file, which editors can change.
+Its `S3_BUCKET` secret then starts with the service's address, such as `https://minio.example.org/parish-media/site/`, which the settings screen shows: the signer can't tell a service it doesn't know from the settings file, which editors can change. The address must start `https://` (or `http://` for `localhost` or `127.0.0.1`), with nothing after the host; the settings screen doesn't offer a service whose address doesn't.
 
 ## Setting up the bucket
 

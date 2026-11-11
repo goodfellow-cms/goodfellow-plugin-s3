@@ -5,6 +5,8 @@
  * its own MinIO server (`s3({ services })`).
  */
 
+import { isServiceAddress } from "./settings.js";
+
 /** What a service needs besides the bucket's name: its region, or the account it's in. */
 export interface ServiceQuestion {
   kind: "region" | "account";
@@ -210,6 +212,8 @@ function customService(value: unknown): StorageService | undefined {
   } catch {
     return undefined;
   }
+  // Only an address the signer takes: one it would refuse would leave the bucket's secret signing nothing.
+  if (!isServiceAddress(origin)) return undefined;
   const region = typeof given.region === "string" && given.region ? given.region : "us-east-1";
   const publicUrl = typeof given.publicUrl === "string" ? given.publicUrl : undefined;
   return {

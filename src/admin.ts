@@ -263,17 +263,19 @@ function sameHost(a: string, b: string): boolean {
 /**
  * The value of the `S3_BUCKET` secret for settings: the bucket, and its folder
  * after a slash, with the service's address first for a service the plugin
- * doesn't know, which the signer can't work out from the settings.
+ * doesn't know, which the signer can't work out from the settings. Nothing
+ * where that address isn't one the signer takes, since a secret without it
+ * would sign nothing.
  */
 export function bucketSecretValue(
   settings: Pick<StorageSettings, "bucket" | "folder"> & { service?: string; endpoint?: string },
-): string {
+): string | undefined {
   const place = `${settings.bucket}${settings.folder ? `/${settings.folder}` : ""}`;
   const known = SERVICES.some((service) => service.id === settings.service);
-  if (!settings.endpoint || known) return place;
+  if (known || (!settings.service && !settings.endpoint)) return place;
   // As the signer reads it back: an address of its own, with nothing after the host.
-  const endpoint = settings.endpoint.trim().replace(/\/+$/, "").toLowerCase();
-  return isServiceAddress(endpoint) ? `${endpoint}/${place}` : place;
+  const endpoint = (settings.endpoint ?? "").trim().replace(/\/+$/, "").toLowerCase();
+  return isServiceAddress(endpoint) ? `${endpoint}/${place}` : undefined;
 }
 
 /**
@@ -583,8 +585,13 @@ async function settingsScreen(element: { ownerDocument: unknown }, api: PluginAd
         folder: typed && !typed.endsWith("/") ? `${typed}/` : typed,
       });
       keysBody.append(
-        h("p", { text: `For these settings, ${BUCKET_SECRET} is:` }),
-        h("pre", {}, h("code", { text: value })),
+        ...(value === undefined
+          ? [
+              h("p", {
+                text: `This service's address isn't one the site can sign at: it needs to start https://. A developer can change it where the site's config adds the service.`,
+              }),
+            ]
+          : [h("p", { text: `For these settings, ${BUCKET_SECRET} is:` }), h("pre", {}, h("code", { text: value }))]),
       );
     }
     if (service) {

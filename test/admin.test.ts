@@ -374,7 +374,8 @@ describe("choosing where files are kept", () => {
     ).toBe("https://minio.example.org/b1");
     expect(
       bucketSecretValue({ service: "custom:minio", endpoint: "http://minio.example.org", bucket: "b1", folder: "" }),
-    ).toBe("b1");
+    ).toBeUndefined();
+    expect(bucketSecretValue({ service: "custom:minio", bucket: "b1", folder: "" })).toBeUndefined();
     expect(JSON.parse(CORS_RULES)).toEqual([
       {
         AllowedOrigins: ["*"],
@@ -406,6 +407,12 @@ describe("choosing where files are kept", () => {
     expect(configured.permissions?.connect).toContain("https://minio.example.org");
     expect(configured.options).toEqual(options);
     expect(servicesFrom({ services: [{ id: "broken" }] })).toHaveLength(SERVICES.length);
+    // Never a service at an address the signer would refuse.
+    const plain = { id: "plain", name: "Plain", endpoint: "http://minio.example.org" };
+    expect(servicesFrom({ services: [plain] })).toHaveLength(SERVICES.length);
+    expect(servicesFrom({ services: [{ ...plain, endpoint: "http://localhost:9000" }] })).toHaveLength(
+      SERVICES.length + 1,
+    );
   });
 });
 
