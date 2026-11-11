@@ -368,6 +368,13 @@ describe("choosing where files are kept", () => {
     expect(
       bucketSecretValue({ service: "custom:minio", endpoint: "https://minio.example.org", bucket: "b1", folder: "s/" }),
     ).toBe("https://minio.example.org/b1/s/");
+    // Never an address the signer would refuse, which would leave the bucket unpinned.
+    expect(
+      bucketSecretValue({ service: "custom:minio", endpoint: "https://MinIO.example.org/", bucket: "b1", folder: "" }),
+    ).toBe("https://minio.example.org/b1");
+    expect(
+      bucketSecretValue({ service: "custom:minio", endpoint: "http://minio.example.org", bucket: "b1", folder: "" }),
+    ).toBe("b1");
     expect(JSON.parse(CORS_RULES)).toEqual([
       {
         AllowedOrigins: ["*"],

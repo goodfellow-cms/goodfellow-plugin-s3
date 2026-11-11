@@ -180,6 +180,13 @@ describe("signing", () => {
     });
     // A region the service wouldn't have can't make an address of its own.
     expect(serviceAddress({ ...aws, location: "eu-west-1.evil.example#" }, keys.place)).toBeUndefined();
+    // A secret naming another address is for another service, never this one's.
+    const elsewhere = { bucket: "parish-media", folder: "site/", endpoint: "https://minio.example.org" };
+    expect(serviceAddress(aws, elsewhere)).toBeUndefined();
+    expect(serviceAddress(aws, { ...elsewhere, endpoint: "https://s3.eu-west-1.amazonaws.com" })).toEqual({
+      endpoint: "https://s3.eu-west-1.amazonaws.com",
+      region: "eu-west-1",
+    });
   });
 
   it("takes a service the plugin doesn't know only at the address the bucket's secret gives", async () => {

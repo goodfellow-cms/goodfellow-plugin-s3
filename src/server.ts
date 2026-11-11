@@ -42,8 +42,9 @@ export function s3Server(options: { root?: string; env?: Record<string, string |
         });
       }
       // An upload to an address the bucket already has replaces that file, which is deleting it as far as visitors
-      // can tell, so that's for owners too. The list is the one the server was built with, so a file added since
-      // isn't in it: the bucket's versioning covers that, as it does deletes.
+      // can tell, so that's for owners too. The list is the server's own copy of the site's, the one it was built
+      // with, so a file added since isn't in it, and where it can't be read nothing is refused: the bucket's
+      // versioning covers both, as it does deletes.
       if (input.action === "upload" && context.editor.role !== "owner") {
         const stored = parseStoredMedia(await readFile(join(root, MEDIA_STORAGE_FILE), "utf8").catch(() => undefined));
         const taken = input.files.find(({ address }) => stored?.files[address] !== undefined);

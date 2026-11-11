@@ -9,6 +9,7 @@
 import { isSignedFor, isSignedRequests, StorageError, sendSigned } from "./client.js";
 import { isAnswer, SERVICES, type StorageService, servicesFrom } from "./services.js";
 import {
+  isServiceAddress,
   MEDIA_STORAGE_FILE,
   objectKey,
   parseSettings,
@@ -269,7 +270,10 @@ export function bucketSecretValue(
 ): string {
   const place = `${settings.bucket}${settings.folder ? `/${settings.folder}` : ""}`;
   const known = SERVICES.some((service) => service.id === settings.service);
-  return settings.endpoint && !known ? `${settings.endpoint}/${place}` : place;
+  if (!settings.endpoint || known) return place;
+  // As the signer reads it back: an address of its own, with nothing after the host.
+  const endpoint = settings.endpoint.trim().replace(/\/+$/, "").toLowerCase();
+  return isServiceAddress(endpoint) ? `${endpoint}/${place}` : place;
 }
 
 /**

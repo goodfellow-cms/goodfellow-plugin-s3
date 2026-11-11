@@ -159,10 +159,13 @@ export interface ServiceAddress {
  * bucket, with the pinned bucket's name as the start of the file's path.
  */
 export function serviceAddress(settings: StorageSettings, place: PinnedPlace): ServiceAddress | undefined {
-  if (place.endpoint) return { endpoint: place.endpoint, region: settings.region };
   const service = SERVICES.find((candidate) => candidate.id === settings.service);
+  if (place.endpoint && !service) return { endpoint: place.endpoint, region: settings.region };
   if (!service || !isAnswer(service.asks, settings.location)) return undefined;
-  return { endpoint: service.endpoint(settings.location), region: service.signingRegion(settings.location) };
+  const endpoint = service.endpoint(settings.location);
+  // A service the plugin knows is at its own address: a secret naming another one is for a different service.
+  if (place.endpoint && place.endpoint !== endpoint.toLowerCase()) return undefined;
+  return { endpoint, region: service.signingRegion(settings.location) };
 }
 
 /** What signing needs from the secrets: the keys and the place they're for. */
