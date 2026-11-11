@@ -4,7 +4,8 @@
  * server. The browser gets an address for each request, which works for
  * an hour and for that request alone, and never the keys.
  */
-import { objectKey, objectUrl, type StorageSettings } from "./settings.js";
+import { isAnswer, SERVICES } from "./services.js";
+import { isServiceAddress, objectKey, objectUrl, type StorageSettings } from "./settings.js";
 import { type Credentials, presignUrl } from "./sigv4.js";
 
 /**
@@ -15,9 +16,12 @@ export const KEY_ID_SECRET = "S3_ACCESS_KEY_ID";
 export const SECRET_KEY_SECRET = "S3_SECRET_ACCESS_KEY";
 /**
  * The bucket the keys may be used for, with the site's folder in it where it
- * has one (`parish-media` or `parish-media/site/`). Editors can change the
- * settings file, so without it they could point the keys at any bucket the
- * keys reach, and delete what's there; the signer signs only for this one.
+ * has one (`parish-media` or `parish-media/site/`), and, for a service the
+ * plugin doesn't know, such as a site's own MinIO server, the service's
+ * address before it (`https://minio.example.org/parish-media/site/`).
+ * Editors can change the settings file, so without it they could point the
+ * keys at any bucket the keys reach, and delete what's there; the signer
+ * signs only for this one, at the address the service gives it.
  */
 export const BUCKET_SECRET = "S3_BUCKET";
 
@@ -112,11 +116,22 @@ export function credentialsFrom(secrets: Record<string, string | undefined>): Cr
 export interface PinnedPlace {
   bucket: string;
   folder: string;
+  /** The service's address, where the secret gives one. */
+  endpoint?: string;
 }
 
 /** The place `BUCKET_SECRET` names, or nothing without it, or where it isn't a bucket's name and folder. */
 export function pinnedFrom(secrets: Record<string, string | undefined>): PinnedPlace | undefined {
-  const value = secrets[BUCKET_SECRET]?.trim().replace(/^\/+/, "");
+  let value = secrets[BUCKET_SECRET]?.trim() ?? "";
+  // A service's address first, for services the plugin doesn't know.
+  const address = /^(https?:\/\/[^/]+)\/+(.*)$/i.exec(value);
+  let endpoint: string | undefined;
+  if (address) {
+    endpoint = (address[1] ?? "").toLowerCase();
+    if (!isServiceAddress(endpoint)) return undefined;
+    value = address[2] ?? "";
+  }
+  value = value.replace(/^\/+/, "");
   if (!value) return undefined;
   const slash = value.indexOf("/");
   const bucket = slash < 0 ? value : value.slice(0, slash);
@@ -125,7 +140,29 @@ export function pinnedFrom(secrets: Record<string, string | undefined>): PinnedP
   if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket)) return undefined;
   if (folder && !/^([\w.~-]+\/)+$/.test(folder)) return undefined;
   if (folder.split("/").some((part) => part === "." || part === "..")) return undefined;
-  return { bucket, folder };
+  return { bucket, folder, ...(endpoint && { endpoint }) };
+}
+
+/** Where requests go and the region they're signed for. */
+export interface ServiceAddress {
+  endpoint: string;
+  region: string;
+}
+
+/**
+ * Where the signer sends requests for these settings, worked out from what
+ * editors can't point elsewhere: the service's address the secret gives, or,
+ * for a service the plugin knows, its address for the bucket's region or
+ * account, as the settings screen works it out. Never the settings file's own
+ * `endpoint`, which an editor could set to another bucket's own address
+ * (`https://other-bucket.s3.amazonaws.com`), which services read as that
+ * bucket, with the pinned bucket's name as the start of the file's path.
+ */
+export function serviceAddress(settings: StorageSettings, place: PinnedPlace): ServiceAddress | undefined {
+  if (place.endpoint) return { endpoint: place.endpoint, region: settings.region };
+  const service = SERVICES.find((candidate) => candidate.id === settings.service);
+  if (!service || !isAnswer(service.asks, settings.location)) return undefined;
+  return { endpoint: service.endpoint(settings.location), region: service.signingRegion(settings.location) };
 }
 
 /** What signing needs from the secrets: the keys and the place they're for. */
@@ -203,6 +240,18 @@ export async function signRequests(
       `The settings keep files somewhere other than the bucket and folder the site's ${BUCKET_SECRET} secret names, so nothing was signed. Change the settings back, or have a developer change the secret.`,
     );
   }
+  const service = serviceAddress(settings, place);
+  if (!service) {
+    throw new Error(
+      `The settings name a service S3 storage doesn't know, so it can't tell where to send files. A developer needs to put the service's address before the bucket in the site's ${BUCKET_SECRET} secret, such as https://storage.example.org/${place.bucket}.`,
+    );
+  }
+  if (service.endpoint !== settings.endpoint.toLowerCase()) {
+    throw new Error(
+      `The settings give the service's address as ${settings.endpoint}, but the bucket is at ${service.endpoint}, so nothing was signed. Choose the service and region again on the S3 storage screen, or have a developer change the site's ${BUCKET_SECRET} secret.`,
+    );
+  }
+  const pinned: StorageSettings = { ...settings, endpoint: service.endpoint, region: service.region };
   const sign = async (
     method: SignedRequest["method"],
     key: string,
@@ -212,10 +261,10 @@ export async function signRequests(
     method,
     url: await presignUrl({
       method,
-      url: objectUrl(settings, key),
+      url: objectUrl(pinned, key),
       headers: size === undefined ? headers : { ...headers, "content-length": String(size) },
       credentials,
-      region: settings.region,
+      region: pinned.region,
       expires: SIGNED_SECONDS,
       date,
     }),

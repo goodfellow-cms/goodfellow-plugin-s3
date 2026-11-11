@@ -24,7 +24,7 @@ const settings = {
   location: "0123456789abcdef0123456789abcdef",
   ownAddress: true,
   publicRead: false,
-  endpoint: "https://account.r2.cloudflarestorage.com",
+  endpoint: "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com",
   bucket: "parish-media",
   region: "auto",
   folder: "",
@@ -200,7 +200,7 @@ describe("media storage in the admin panel", () => {
       {
         method: "DELETE",
         address: "/media/a.jpg",
-        url: "https://account.r2.cloudflarestorage.com/parish-media/b.jpg",
+        url: "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com/parish-media/b.jpg",
         headers: {},
       },
     ];
@@ -270,11 +270,11 @@ describe("media storage in the admin panel", () => {
 
   it("reaches only the services its permissions name", () => {
     const connect = plugin.permissions?.connect ?? [];
-    expect(reachable("https://account.r2.cloudflarestorage.com", connect)).toBe(true);
+    expect(reachable("https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com", connect)).toBe(true);
     expect(reachable("https://s3.eu-west-1.amazonaws.com", connect)).toBe(true);
     expect(reachable("https://storage.googleapis.com", connect)).toBe(true);
     expect(reachable("https://amazonaws.com.evil.example", connect)).toBe(false);
-    expect(reachable("http://account.r2.cloudflarestorage.com", connect)).toBe(false);
+    expect(reachable("http://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com", connect)).toBe(false);
   });
 });
 
@@ -361,6 +361,13 @@ describe("choosing where files are kept", () => {
   it("says what the bucket's secret is, and asks the bucket to allow only the frame's requests", () => {
     expect(bucketSecretValue({ bucket: "parish-media", folder: "" })).toBe("parish-media");
     expect(bucketSecretValue({ bucket: "parish-media", folder: "site/" })).toBe("parish-media/site/");
+    // The signer works out a known service's address itself, and takes a site's own service's from the secret.
+    expect(
+      bucketSecretValue({ service: "aws", endpoint: "https://s3.eu-west-1.amazonaws.com", bucket: "b1", folder: "" }),
+    ).toBe("b1");
+    expect(
+      bucketSecretValue({ service: "custom:minio", endpoint: "https://minio.example.org", bucket: "b1", folder: "s/" }),
+    ).toBe("https://minio.example.org/b1/s/");
     expect(JSON.parse(CORS_RULES)).toEqual([
       {
         AllowedOrigins: ["*"],

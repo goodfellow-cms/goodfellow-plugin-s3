@@ -9,7 +9,7 @@ const settings: StorageSettings = {
   location: "0123456789abcdef0123456789abcdef",
   ownAddress: true,
   publicRead: false,
-  endpoint: "https://account.r2.cloudflarestorage.com",
+  endpoint: "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com",
   bucket: "parish-media",
   region: "auto",
   folder: "site/",
@@ -30,7 +30,7 @@ describe("the bucket", () => {
     );
     await sendSigned(put as SignedRequest, "keep it", new Blob(["video"]), s3.fetch);
     expect(s3.requests[0]?.url).toMatch(
-      /^https:\/\/account\.r2\.cloudflarestorage\.com\/parish-media\/site\/sermon\.mp4\?/,
+      /^https:\/\/0123456789abcdef0123456789abcdef\.r2\.cloudflarestorage\.com\/parish-media\/site\/sermon\.mp4\?/,
     );
     expect(s3.objects.get("parish-media/site/sermon.mp4")?.type).toBe("video/mp4");
     expect(new TextDecoder().decode(s3.objects.get("parish-media/site/sermon.mp4")?.body)).toBe("video");
@@ -181,8 +181,14 @@ describe("the bucket", () => {
     const elsewhere = (url: string) => isSignedFor({ ...request, url }, settings, "PUT", "site/a.jpg");
     const query = new URL(request.url).search;
     expect(elsewhere(`https://attacker.example/parish-media/site/a.jpg${query}`)).toBe(false);
-    expect(elsewhere(`https://account.r2.cloudflarestorage.com/other-bucket/site/a.jpg${query}`)).toBe(false);
-    expect(elsewhere(`https://user@account.r2.cloudflarestorage.com/parish-media/site/a.jpg${query}`)).toBe(false);
+    expect(
+      elsewhere(`https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com/other-bucket/site/a.jpg${query}`),
+    ).toBe(false);
+    expect(
+      elsewhere(
+        `https://user@0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com/parish-media/site/a.jpg${query}`,
+      ),
+    ).toBe(false);
     expect(elsewhere(`${request.url}&uploads=1`)).toBe(false);
     expect(elsewhere("not an address")).toBe(false);
   });
@@ -229,7 +235,7 @@ describe("the bucket", () => {
     expect(() => objectUrl(settings, "site/../escaped.txt")).toThrow(/isn't an object/);
     expect(() => objectUrl(settings, "other/x.txt")).toThrow(/isn't an object/);
     expect(objectUrl({ ...settings, folder: "" }, "a b.jpg").href).toBe(
-      "https://account.r2.cloudflarestorage.com/parish-media/a%20b.jpg",
+      "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com/parish-media/a%20b.jpg",
     );
   });
 });

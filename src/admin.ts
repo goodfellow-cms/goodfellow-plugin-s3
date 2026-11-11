@@ -7,7 +7,7 @@
  * and the frame sends files to the bucket at the signed addresses.
  */
 import { isSignedFor, isSignedRequests, StorageError, sendSigned } from "./client.js";
-import { isAnswer, type StorageService, servicesFrom } from "./services.js";
+import { isAnswer, SERVICES, type StorageService, servicesFrom } from "./services.js";
 import {
   MEDIA_STORAGE_FILE,
   objectKey,
@@ -259,9 +259,17 @@ function sameHost(a: string, b: string): boolean {
   }
 }
 
-/** The value of the `S3_BUCKET` secret for settings: the bucket, and its folder after a slash. */
-export function bucketSecretValue(settings: Pick<StorageSettings, "bucket" | "folder">): string {
-  return `${settings.bucket}${settings.folder ? `/${settings.folder}` : ""}`;
+/**
+ * The value of the `S3_BUCKET` secret for settings: the bucket, and its folder
+ * after a slash, with the service's address first for a service the plugin
+ * doesn't know, which the signer can't work out from the settings.
+ */
+export function bucketSecretValue(
+  settings: Pick<StorageSettings, "bucket" | "folder"> & { service?: string; endpoint?: string },
+): string {
+  const place = `${settings.bucket}${settings.folder ? `/${settings.folder}` : ""}`;
+  const known = SERVICES.some((service) => service.id === settings.service);
+  return settings.endpoint && !known ? `${settings.endpoint}/${place}` : place;
 }
 
 /**
@@ -560,12 +568,13 @@ async function settingsScreen(element: { ownerDocument: unknown }, api: PluginAd
     keysBody.replaceChildren();
     keysBody.append(
       h("p", {
-        text: `The bucket's keys never go into the admin panel: the site keeps them as ${KEY_ID_SECRET} and ${SECRET_KEY_SECRET}, and signs each upload with them. It also keeps ${BUCKET_SECRET}, the bucket and folder the keys are for, and signs nothing anywhere else, even if these settings change.`,
+        text: `The bucket's keys never go into the admin panel: the site keeps them as ${KEY_ID_SECRET} and ${SECRET_KEY_SECRET}, and signs each upload with them. It also keeps ${BUCKET_SECRET}, the bucket and folder the keys are for (with the service's address first, for a service of the site's own), and signs nothing anywhere else, even if these settings change.`,
       }),
     );
     if (bucket.value.trim()) {
       const typed = folder.value.trim().replace(/^\/+/, "");
       const value = bucketSecretValue({
+        ...(service && { service: service.id, endpoint: service.endpoint(location.value.trim()) }),
         bucket: bucket.value.trim(),
         folder: typed && !typed.endsWith("/") ? `${typed}/` : typed,
       });

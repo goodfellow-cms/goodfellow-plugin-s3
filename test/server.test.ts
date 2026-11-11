@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { s3Server } from "../src/server.js";
-import { SETTINGS_FILE, settingsText } from "../src/settings.js";
+import { MEDIA_STORAGE_FILE, SETTINGS_FILE, settingsText } from "../src/settings.js";
 import { fakeS3 } from "./fake-s3.js";
 
 const settings = {
@@ -11,7 +11,7 @@ const settings = {
   location: "0123456789abcdef0123456789abcdef",
   ownAddress: true,
   publicRead: false,
-  endpoint: "https://account.r2.cloudflarestorage.com",
+  endpoint: "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com",
   bucket: "parish-media",
   region: "auto",
   folder: "",
@@ -64,6 +64,41 @@ describe("the server module", () => {
     // Editors still upload.
     const upload = { action: "upload", files: [{ address: "/media/a.jpg", type: "image/jpeg", size: 1 }] };
     expect((await answer(ask(upload), { path: "sign", editor })).status).toBe(200);
+  });
+
+  it("signs replacing a file the bucket already keeps for owners only, since that deletes the file before", async () => {
+    await writeFile(
+      join(root, MEDIA_STORAGE_FILE),
+      JSON.stringify({
+        version: 1,
+        plugin: "goodfellow-plugin-s3",
+        url: "https://media.example.org",
+        files: { "/media/sermon.mp4": { size: 10 } },
+      }),
+    );
+    try {
+      const answer = s3Server({
+        root,
+        env: { S3_ACCESS_KEY_ID: "KEY", S3_SECRET_ACCESS_KEY: "SECRET", S3_BUCKET: "parish-media" },
+      });
+      const files = [
+        { address: "/media/new.jpg", type: "image/jpeg", size: 1 },
+        { address: "/media/sermon.mp4", type: "video/mp4", size: 1 },
+      ];
+      const refused = await answer(ask({ action: "upload", files }), { path: "sign", editor });
+      expect(refused.status).toBe(403);
+      expect(await refused.json()).toMatchObject({
+        error: "not-allowed",
+        message: expect.stringMatching(/owners can replace.*\/media\/sermon\.mp4/),
+      });
+      const owner = { login: "olive", role: "owner" as const };
+      expect((await answer(ask({ action: "upload", files }), { path: "sign", editor: owner })).status).toBe(200);
+      // New files are still the editors' to upload.
+      const fresh = { action: "upload", files: files.slice(0, 1) };
+      expect((await answer(ask(fresh), { path: "sign", editor })).status).toBe(200);
+    } finally {
+      await rm(join(root, MEDIA_STORAGE_FILE), { force: true });
+    }
   });
 
   it("signs nothing without the bucket its keys are for", async () => {
