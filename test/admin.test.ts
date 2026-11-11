@@ -9,6 +9,7 @@ import admin, {
   chosenSettings,
   movesStoredFiles,
   reachable,
+  shownBucketSecret,
   signed,
 } from "../src/admin.js";
 import plugin, { SERVICES, s3 } from "../src/index.js";
@@ -376,6 +377,18 @@ describe("choosing where files are kept", () => {
       bucketSecretValue({ service: "custom:minio", endpoint: "http://minio.example.org", bucket: "b1", folder: "" }),
     ).toBeUndefined();
     expect(bucketSecretValue({ service: "custom:minio", bucket: "b1", folder: "" })).toBeUndefined();
+    // On the screen: nothing until a service is chosen, as where saved settings name one the config no longer adds.
+    const aws = SERVICES.find((service) => service.id === "aws");
+    expect(shownBucketSecret(undefined, "", "b1", "s")).toEqual({ missing: "service" });
+    expect(shownBucketSecret(aws, "eu-west-1", "b1", "s")).toEqual({ value: "b1/s/" });
+    expect(shownBucketSecret(aws, "eu-west-1", " ", "")).toBeUndefined();
+    const minio = servicesFrom({
+      services: [{ id: "minio", name: "MinIO", endpoint: "https://minio.example.org" }],
+    }).at(-1);
+    expect(shownBucketSecret(minio, "", "b1", "")).toEqual({ value: "https://minio.example.org/b1" });
+    expect(shownBucketSecret(minio && { ...minio, endpoint: () => "http://minio.example.org" }, "", "b1", "")).toEqual({
+      missing: "address",
+    });
     expect(JSON.parse(CORS_RULES)).toEqual([
       {
         AllowedOrigins: ["*"],

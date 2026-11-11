@@ -279,6 +279,30 @@ export function bucketSecretValue(
 }
 
 /**
+ * What the keys section says about `S3_BUCKET` for what's on the screen: its
+ * value, or why there's none yet: no service chosen, as where saved settings
+ * name one the site's config no longer adds, or a service at an address the
+ * signer can't take. Nothing before a bucket is typed.
+ */
+export function shownBucketSecret(
+  service: StorageService | undefined,
+  location: string,
+  bucket: string,
+  folder: string,
+): { value: string } | { missing: "service" | "address" } | undefined {
+  if (!bucket.trim()) return undefined;
+  if (!service) return { missing: "service" };
+  const typed = folder.trim().replace(/^\/+/, "");
+  const value = bucketSecretValue({
+    service: service.id,
+    endpoint: service.endpoint(location.trim()),
+    bucket: bucket.trim(),
+    folder: typed && !typed.endsWith("/") ? `${typed}/` : typed,
+  });
+  return value === undefined ? { missing: "address" } : { value };
+}
+
+/**
  * Why new settings would lose the site's stored files, or nothing: they must
  * stay at the same public address, in the same service, bucket and folder,
  * until they're moved back to the site.
@@ -577,21 +601,19 @@ async function settingsScreen(element: { ownerDocument: unknown }, api: PluginAd
         text: `The bucket's keys never go into the admin panel: the site keeps them as ${KEY_ID_SECRET} and ${SECRET_KEY_SECRET}, and signs each upload with them. It also keeps ${BUCKET_SECRET}, the bucket and folder the keys are for (with the service's address first, for a service of the site's own), and signs nothing anywhere else, even if these settings change.`,
       }),
     );
-    if (bucket.value.trim()) {
-      const typed = folder.value.trim().replace(/^\/+/, "");
-      const value = bucketSecretValue({
-        ...(service && { service: service.id, endpoint: service.endpoint(location.value.trim()) }),
-        bucket: bucket.value.trim(),
-        folder: typed && !typed.endsWith("/") ? `${typed}/` : typed,
-      });
+    const shown = shownBucketSecret(service, location.value, bucket.value, folder.value);
+    if (shown && "value" in shown) {
       keysBody.append(
-        ...(value === undefined
-          ? [
-              h("p", {
-                text: `This service's address isn't one the site can sign at: it needs to start https://. A developer can change it where the site's config adds the service.`,
-              }),
-            ]
-          : [h("p", { text: `For these settings, ${BUCKET_SECRET} is:` }), h("pre", {}, h("code", { text: value }))]),
+        h("p", { text: `For these settings, ${BUCKET_SECRET} is:` }),
+        h("pre", {}, h("code", { text: shown.value })),
+      );
+    } else if (shown?.missing === "service") {
+      keysBody.append(h("p", { text: `Choose the service above to see what ${BUCKET_SECRET} is.` }));
+    } else if (shown?.missing === "address") {
+      keysBody.append(
+        h("p", {
+          text: `This service's address isn't one the site can sign at: it needs to start https://. A developer can change it where the site's config adds the service.`,
+        }),
       );
     }
     if (service) {
