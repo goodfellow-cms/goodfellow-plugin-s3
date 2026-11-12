@@ -1,16 +1,19 @@
 # Claude reviews a pull request with Claude Code's /code-review, posting what it finds as comments on the lines.
 #
 # - Once CI has passed: CI's claude-review job calls this after its other jobs succeed, the first time they do
-#   on a pull request that's ready for review. It then labels the pull request claude-reviewed, so later pushes
-#   aren't reviewed again by themselves.
-# - On request: a comment that says `/claude-review` reviews the pull request as it is now (`/claude-review high`
-#   at that level, for that review only). So does adding the claude-review label, which is taken off again
-#   afterwards, ready to add another time. A comment starts the main branch's copy of this workflow; a label, the
-#   pull request's own, which gets this repository's secrets only for a branch here, whose author can already push
-#   here. Either way only pull requests from branches here are reviewed, and only someone who can push here starts a
-#   review, since each one uses the subscription.
+#   on a pull request that's ready for review, and only for the commit whose CI passed. It then labels the pull
+#   request claude-reviewed, so later pushes aren't reviewed again by themselves.
+# - On request: a comment whose first line is `/claude-review` reviews the pull request as it is now
+#   (`/claude-review high` at that level, for that review only). So does adding the claude-review label, which is
+#   taken off again afterwards, ready to add another time.
 # - Levels: claude-review:low, :high, or :xhigh on the pull request sets the level of every review of it, which is
 #   medium otherwise, and no-claude-review skips the review CI would start.
+#
+# Every review runs the pull request's own copy of this workflow, which gets this repository's secrets only for a
+# branch here, whose author can already push here: a label's run is the pull request's own, and a comment's run (the
+# main branch's) only checks the request and starts the pull request's own copy with workflow_dispatch, never
+# reading its code. Only pull requests from branches here are reviewed, and only someone who can push here starts a
+# review, since each one uses the subscription.
 #
 # Each review keeps one comment up to date: that Claude is reviewing a commit, then what it found or why it
 # couldn't, and what it used. That comment carries the review's commit and how it went, which review-status.yml
@@ -19,9 +22,9 @@
 # It runs on the Claude subscription of whoever made the CLAUDE_CODE_OAUTH_TOKEN secret (`claude setup-token`),
 # and does nothing until there is one. It reads the pull request and runs none of its code: Claude Code loads only
 # the runner's settings, never the pull request's .claude/ settings and their hooks, and runs in a job of its own that
-# can only read and comment, apart from the jobs that label, report, and refresh the status.
-# Pull requests from forks are never reviewed, since GitHub gives their runs no secrets. A review that fails, such
-# as when the plan's limit is reached, never fails CI; the "Claude reviewed" status says so instead.
+# can only read and comment, apart from the jobs that label, report, and refresh the status. Pull requests from
+# forks are never reviewed, since GitHub gives their runs no secrets. A review that fails, such as when the plan's
+# limit is reached, never fails CI; the "Claude reviewed" status says so instead.
 name: Claude review
 
 on:
@@ -33,19 +36,71 @@ on:
     types: [labeled]
   issue_comment:
     types: [created]
+  # How a comment's run starts the pull request's own copy, and how someone who can push can ask from the Actions tab.
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: The pull request's number
+        required: true
+        type: string
+      level:
+        description: low, medium, high, or xhigh, for this review only
+        required: false
+        type: string
 
 permissions: {}
 
 env:
   GH_REPO: ${{ github.repository }}
-  PR: ${{ github.event.pull_request.number || github.event.issue.number }}
+  PR: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
+  LEVELS: low medium high xhigh
 
 jobs:
+  # A comment asking for a review, checked here and passed to the pull request's own copy of this workflow.
+  request:
+    if: >-
+      github.event_name == 'issue_comment'
+      && github.event.issue.pull_request
+      && startsWith(github.event.comment.body, '/claude-review')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      issues: write
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Start the pull request's own review
+        env:
+          HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+          ACTOR: ${{ github.event.sender.login }}
+          COMMENT: ${{ github.event.comment.body }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: |
+          if [ "$HAS_TOKEN" != "true" ]; then echo "::notice::No CLAUDE_CODE_OAUTH_TOKEN secret, so no review."; exit 0; fi
+          # The comment's first line alone, so a comment that only mentions the command further down asks nothing.
+          first=$(head -n 1 <<<"$COMMENT" | tr -d '\r')
+          if ! [[ "$first" =~ ^/claude-review([[:space:]]+(low|medium|high|xhigh))?[[:space:]]*$ ]]; then
+            echo "::notice::Not a request for a review."; exit 0
+          fi
+          level=${BASH_REMATCH[2]}
+          permission=$(gh api "repos/$GH_REPO/collaborators/$ACTOR/permission" --jq .permission) || permission=none
+          case "$permission" in admin | maintain | write) ;; *)
+            echo "::notice::$ACTOR can't push here, so they can't start a review."; exit 0 ;;
+          esac
+          pr=$(gh pr view "$PR" --json headRefName,isCrossRepository,state)
+          if jq -e '.isCrossRepository or .state != "OPEN"' <<<"$pr" > /dev/null; then
+            echo "::notice::Only open pull requests from branches here are reviewed."; exit 0
+          fi
+          gh api --method POST "repos/$GH_REPO/issues/comments/$COMMENT_ID/reactions" -f content=eyes > /dev/null || true
+          if ! gh workflow run claude-review.yml --ref "$(jq -r .headRefName <<<"$pr")" -f pr="$PR" -f level="$level"; then
+            gh pr comment "$PR" --body "This branch's copy of \`claude-review.yml\` can't be asked by a comment yet. Merge the main branch into it and comment \`/claude-review\` again, or add the \`claude-review\` label."
+          fi
+
   choose:
     if: >-
-      (github.event_name == 'issue_comment'
-        && github.event.issue.pull_request
-        && startsWith(github.event.comment.body, '/claude-review'))
+      github.event_name == 'workflow_dispatch'
       || (github.event_name != 'issue_comment'
         && github.event.pull_request.head.repo.full_name == github.repository
         && ((github.event.action == 'labeled'
@@ -64,6 +119,7 @@ jobs:
       run: ${{ steps.choose.outputs.run }}
       level: ${{ steps.choose.outputs.level }}
       sha: ${{ steps.choose.outputs.sha }}
+      stale: ${{ steps.choose.outputs.stale }}
       comment: ${{ steps.comment.outputs.id }}
     env:
       GH_TOKEN: ${{ github.token }}
@@ -75,64 +131,60 @@ jobs:
           ADDED: ${{ github.event.label.name }}
           EVENT: ${{ github.event_name }}
           EVENT_ACTION: ${{ github.event.action }}
+          EVENT_SHA: ${{ github.event.pull_request.head.sha }}
           ACTOR: ${{ github.event.sender.login }}
-          COMMENT: ${{ github.event.comment.body }}
-          COMMENT_ID: ${{ github.event.comment.id }}
+          ASKED: ${{ inputs.level }}
         run: |
-          if [ "$HAS_TOKEN" != "true" ]; then
-            echo "::notice::No CLAUDE_CODE_OAUTH_TOKEN secret, so no review."
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            exit 0
+          skip() { echo "::notice::$1"; echo "run=false" >> "$GITHUB_OUTPUT"; exit 0; }
+          if [ "$HAS_TOKEN" != "true" ]; then skip "No CLAUDE_CODE_OAUTH_TOKEN secret, so no review."; fi
+          if [ "$EVENT_ACTION" = "labeled" ] && [ "$ADDED" != "claude-review" ] \
+            && [[ " $LEVELS " != *" ${ADDED#claude-review:} "* ]]; then
+            skip "$ADDED isn't a level, so it starts no review."
           fi
-          asked=""
-          if [ "$EVENT" = "issue_comment" ]; then
-            # The comment's first line alone, so a comment that only mentions the command further down asks nothing.
-            first=$(head -n 1 <<<"$COMMENT" | tr -d '\r')
-            if ! [[ "$first" =~ ^/claude-review([[:space:]]+(low|medium|high|xhigh))?[[:space:]]*$ ]]; then
-              echo "::notice::Not a request for a review."
-              echo "run=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            asked=${BASH_REMATCH[2]}
-          fi
-          if [ "$EVENT_ACTION" = "labeled" ] || [ "$EVENT" = "issue_comment" ]; then
+          if [ -n "$ASKED" ] && [[ " $LEVELS " != *" $ASKED "* ]]; then skip "$ASKED isn't a level."; fi
+          if ! [[ "$PR" =~ ^[0-9]+$ ]]; then skip "$PR isn't a pull request's number."; fi
+          # Anyone who can add a label can start a run, but only someone who can push starts a review. A dispatch
+          # needs push access already.
+          if [ "$EVENT_ACTION" = "labeled" ]; then
             permission=$(gh api "repos/$GH_REPO/collaborators/$ACTOR/permission" --jq .permission) || permission=none
-            case "$permission" in admin | maintain | write) ;; *)
-              echo "::notice::$ACTOR can't push here, so they can't start a review."
-              echo "run=false" >> "$GITHUB_OUTPUT"
-              exit 0 ;;
-            esac
+            case "$permission" in admin | maintain | write) ;; *) skip "$ACTOR can't push here, so they can't start a review." ;; esac
           fi
-          pr=$(gh pr view "$PR" --json headRefOid,labels,isCrossRepository,state)
-          # A comment's event doesn't say where the pull request's branch is, so it's read here.
+          pr=$(gh pr view "$PR" --json headRefOid,headRefName,labels,isCrossRepository,state)
           if jq -e '.isCrossRepository or .state != "OPEN"' <<<"$pr" > /dev/null; then
-            echo "::notice::Only open pull requests from branches here are reviewed."
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            skip "Only open pull requests from branches here are reviewed."
           fi
-          # The event's labels are as they were when it fired: a review that ran meanwhile, such as for an earlier
-          # push, may have labelled the pull request since.
-          if [ "$EVENT" = "pull_request" ] && [ "$EVENT_ACTION" != "labeled" ] \
-            && jq -e '[.labels[].name] | any(. == "claude-reviewed" or . == "no-claude-review")' <<<"$pr" > /dev/null; then
-            echo "::notice::Already reviewed, or not to be reviewed by itself."
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            exit 0
+          head=$(jq -r .headRefOid <<<"$pr")
+          # A dispatch reviews only with the pull request's own copy of this workflow.
+          if [ "$EVENT" = "workflow_dispatch" ] && [ "$(jq -r .headRefName <<<"$pr")" != "$GITHUB_REF_NAME" ]; then
+            skip "Run this on the pull request's own branch, $(jq -r .headRefName <<<"$pr")."
           fi
-          if [ -n "$COMMENT_ID" ]; then
-            gh api --method POST "repos/$GH_REPO/issues/comments/$COMMENT_ID/reactions" -f content=eyes > /dev/null || true
+          if [ "$EVENT" = "pull_request" ] && [ "$EVENT_ACTION" != "labeled" ]; then
+            # CI passed for this run's commit; a newer one is reviewed, if at all, once its own CI passes.
+            if [ "$head" != "$EVENT_SHA" ]; then skip "The pull request has moved on from the commit whose CI passed."; fi
+            # The event's labels are as they were when it fired: a review that ran meanwhile, such as for an earlier
+            # push, may have labelled the pull request since.
+            if jq -e '[.labels[].name] | any(. == "claude-reviewed" or . == "no-claude-review")' <<<"$pr" > /dev/null; then
+              skip "Already reviewed, or not to be reviewed by itself."
+            fi
           fi
-          levels="low medium high xhigh"
           level=medium
-          # A level label on the pull request, then the one just added, then a level the comment asked for, which wins.
+          # A level label on the pull request, then the one just added, then a level asked for, which wins.
           for label in $(jq -r '.labels[].name' <<<"$pr") "$ADDED"; do
             case "$label" in claude-review:*) wanted=${label#claude-review:} ;; *) continue ;; esac
-            [[ " $levels " == *" $wanted "* ]] && level=$wanted
+            [[ " $LEVELS " == *" $wanted "* ]] && level=$wanted
           done
-          if [ -n "$asked" ]; then level=$asked; fi
+          if [ -n "$ASKED" ]; then level=$ASKED; fi
+          # The level labels a newly added one replaces: those on the pull request now, so cleanup never takes off
+          # one added while this review runs.
+          stale=""
+          if [[ "$ADDED" == claude-review:* ]]; then
+            stale=$(jq -r --arg added "$ADDED" '[.labels[].name | select(startswith("claude-review:") and . != $added)] | join(" ")' <<<"$pr")
+          fi
           {
             echo "run=true"
             echo "level=$level"
-            echo "sha=$(jq -r .headRefOid <<<"$pr")"
+            echo "sha=$head"
+            echo "stale=$stale"
           } >> "$GITHUB_OUTPUT"
 
       # The review's own comment, which says what's happening until it ends.
@@ -151,12 +203,7 @@ jobs:
 
   review:
     needs: choose
-    # A comment's run is the main branch's, with its secrets, so this job checks who asked again, beside choose's
-    # check of their permission: someone the repository knows, never a stranger's comment.
-    if: >-
-      needs.choose.outputs.run == 'true'
-      && (github.event_name != 'issue_comment'
-        || contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
+    if: needs.choose.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     # Only what reading and commenting on lines need: Claude runs with this job's token.
@@ -164,11 +211,15 @@ jobs:
       contents: read
       pull-requests: write
     concurrency:
-      group: claude-review-${{ github.event.pull_request.number || github.event.issue.number }}
+      group: claude-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
     outputs:
+      outcome: ${{ steps.claude.outcome }}
       usage: ${{ steps.usage.outputs.text }}
     steps:
+      # A review that fails says so in its comment and the "Claude reviewed" status, never by failing CI.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
+        continue-on-error: true
         with:
           ref: ${{ needs.choose.outputs.sha }}
           fetch-depth: 0
@@ -176,6 +227,8 @@ jobs:
 
       - name: Review
         id: claude
+        if: steps.checkout.outcome == 'success'
+        continue-on-error: true
         uses: anthropics/claude-code-action@c0949c50a78c1ec8ce2647db36629b870e715d0c # v1.0.268
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -222,9 +275,12 @@ jobs:
       issues: write
     env:
       GH_TOKEN: ${{ github.token }}
+    # Every step runs whatever the one before did, and none fails CI, so the comment and the status always say how
+    # the review went.
     steps:
       - name: Remember the review
-        if: always() && needs.review.result == 'success'
+        if: always() && needs.review.outputs.outcome == 'success'
+        continue-on-error: true
         run: |
           gh label create claude-reviewed --color ededed --description "Claude has reviewed it; comment /claude-review for another review" 2> /dev/null || true
           gh pr edit "$PR" --add-label claude-reviewed
@@ -232,22 +288,20 @@ jobs:
       # The plain request comes off, ready to add again; a level label stays, the only one of its kind.
       - name: Take the request off
         if: always() && github.event.action == 'labeled'
+        continue-on-error: true
         env:
           ADDED: ${{ github.event.label.name }}
+          STALE: ${{ needs.choose.outputs.stale }}
         run: |
-          if [ "$ADDED" = "claude-review" ]; then
-            gh pr edit "$PR" --remove-label claude-review
-          else
-            for label in $(gh pr view "$PR" --json labels --jq '.labels[].name'); do
-              if [[ "$label" == claude-review:* && "$label" != "$ADDED" ]]; then gh pr edit "$PR" --remove-label "$label"; fi
-            done
-          fi
+          if [ "$ADDED" = "claude-review" ]; then gh pr edit "$PR" --remove-label claude-review; fi
+          for label in $STALE; do gh pr edit "$PR" --remove-label "$label"; done
 
-      # Every step runs whatever the one before did, so the comment and the status always say how the review went.
       - name: Say how it went
         if: always()
+        continue-on-error: true
         env:
           RESULT: ${{ needs.review.result }}
+          OUTCOME: ${{ needs.review.outputs.outcome }}
           USAGE: ${{ needs.review.outputs.usage }}
           LEVEL: ${{ needs.choose.outputs.level }}
           SHA: ${{ needs.choose.outputs.sha }}
@@ -255,17 +309,16 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           short=${SHA:0:7}
-          case "$RESULT" in
-            success)
-              outcome=reviewed
-              body="Claude reviewed $short at **$LEVEL**. What it found is in comments on the lines; none means it found nothing to raise." ;;
-            cancelled)
-              outcome=failed
-              body="Claude's review of $short at **$LEVEL** didn't finish ([the run]($RUN_URL)). Comment \`/claude-review\` to try again." ;;
-            *)
-              outcome=failed
-              body="Claude couldn't review $short at **$LEVEL** ([the run]($RUN_URL) says why). Comment \`/claude-review\` to try again." ;;
-          esac
+          if [ "$RESULT" = success ] && [ "$OUTCOME" = success ]; then
+            outcome=reviewed
+            body="Claude reviewed $short at **$LEVEL**. What it found is in comments on the lines; none means it found nothing to raise."
+          elif [ "$RESULT" = cancelled ]; then
+            outcome=failed
+            body="Claude's review of $short at **$LEVEL** didn't finish ([the run]($RUN_URL)). Comment \`/claude-review\` to try again."
+          else
+            outcome=failed
+            body="Claude couldn't review $short at **$LEVEL** ([the run]($RUN_URL) says why). Comment \`/claude-review\` to try again."
+          fi
           body=$(printf '<!-- claude-review sha=%s outcome=%s -->\n%s\n\nUsage: %s\n' "$SHA" "$outcome" "$body" "${USAGE:-Claude Code reported no usage.}")
           printf '%s\n' "$body" >> "$GITHUB_STEP_SUMMARY"
           gh api --method PATCH "repos/$GH_REPO/issues/comments/$COMMENT" -f body="$body" > /dev/null
@@ -273,6 +326,7 @@ jobs:
       # The status follows the comment just written; a run started by this job's token is the one kind GitHub allows.
       - name: Refresh the status
         if: always()
+        continue-on-error: true
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: gh workflow run review-status.yml --ref "$DEFAULT_BRANCH"
