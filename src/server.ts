@@ -7,6 +7,7 @@
  */
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { SignError } from "./errors.js";
 import { MEDIA_STORAGE_FILE, parseSettings, parseStoredMedia, SETTINGS_FILE } from "./settings.js";
 import { keysFrom, signInput, signRequests } from "./signing.js";
 import type { PluginServerContext } from "./types.js";
@@ -57,7 +58,10 @@ export function s3Server(options: { root?: string; env?: Record<string, string |
       }
       return json(200, { requests: await signRequests(input, settings, keys) });
     } catch (error) {
-      return json(400, { error: "not-signed", message: error instanceof Error ? error.message : String(error) });
+      // Only problems worded for the editor go back as they are; any other error's message could name the server's
+      // own files or code, so it gets a fixed one.
+      const message = error instanceof SignError ? error.message : "S3 storage couldn't sign that request.";
+      return json(400, { error: "not-signed", message });
     }
   };
 }

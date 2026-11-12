@@ -4,6 +4,8 @@
  * server. The browser gets an address for each request, which works for
  * an hour and for that request alone, and never the keys.
  */
+
+import { SignError } from "./errors.js";
 import { isAnswer, SERVICES } from "./services.js";
 import { isServiceAddress, objectKey, objectUrl, type StorageSettings } from "./settings.js";
 import { type Credentials, presignUrl } from "./sigv4.js";
@@ -209,13 +211,13 @@ export function signInput(value: unknown): SignInput {
   ) {
     const files = input.files as { address: string; type?: string; size: number }[];
     const large = files.find((file) => file.size > MAX_BYTES);
-    if (large) throw new Error(`${large.address} is larger than S3 storage takes in one upload.`);
+    if (large) throw new SignError(`${large.address} is larger than S3 storage takes in one upload.`);
     return {
       action: "upload",
       files: files.map(({ address, type, size }) => ({ address, type: type || "application/octet-stream", size })),
     };
   }
-  throw new Error("S3 storage was asked for something it doesn't sign.");
+  throw new SignError("S3 storage was asked for something it doesn't sign.");
 }
 
 /** Signs what the admin module asked for. Throws, in words for the editor, when it can't. */
@@ -226,31 +228,31 @@ export async function signRequests(
   date: Date = new Date(),
 ): Promise<SignedRequest[]> {
   const asked = signInput(input);
-  if (!settings) throw new Error("S3 storage isn't set up yet: save its settings first.");
+  if (!settings) throw new SignError("S3 storage isn't set up yet: save its settings first.");
   const { credentials, place } = keys;
   if (!credentials) {
-    throw new Error(
+    throw new SignError(
       `The site has no keys for the bucket. A developer needs to add ${KEY_ID_SECRET} and ${SECRET_KEY_SECRET} to its secrets.`,
     );
   }
   if (!place) {
-    throw new Error(
+    throw new SignError(
       `The site doesn't say which bucket its keys are for. A developer needs to add ${BUCKET_SECRET} to its secrets: the bucket's name, with the folder after a slash where the settings have one.`,
     );
   }
   if (!isPinnedPlace(settings, place)) {
-    throw new Error(
+    throw new SignError(
       `The settings keep files somewhere other than the bucket and folder the site's ${BUCKET_SECRET} secret names, so nothing was signed. Change the settings back, or have a developer change the secret.`,
     );
   }
   const service = serviceAddress(settings, place);
   if (!service) {
-    throw new Error(
+    throw new SignError(
       `The settings name a service S3 storage doesn't know, so it can't tell where to send files. A developer needs to put the service's address before the bucket in the site's ${BUCKET_SECRET} secret, such as https://storage.example.org/${place.bucket}.`,
     );
   }
   if (service.endpoint !== settings.endpoint.toLowerCase()) {
-    throw new Error(
+    throw new SignError(
       `The settings give the service's address as ${settings.endpoint}, but the bucket is at ${service.endpoint}, so nothing was signed. Choose the service and region again on the S3 storage screen, or have a developer change the site's ${BUCKET_SECRET} secret.`,
     );
   }
@@ -289,7 +291,7 @@ export async function signRequests(
     asked.files.map(async ({ address, size }) => {
       const key = objectKey(settings, address);
       const type = contentTypeOf(address);
-      if (!type) throw new Error(`${address} isn't a kind of file S3 storage keeps.`);
+      if (!type) throw new SignError(`${address} isn't a kind of file S3 storage keeps.`);
       // An SVG can hold a script, which runs where it's opened on its own: it's downloaded instead, and still
       // shows in pages' images. The admin panel cleans SVGs first, but a signed address takes whatever is sent.
       const opened: Record<string, string> = type === "image/svg+xml" ? { "content-disposition": "attachment" } : {};

@@ -108,6 +108,22 @@ describe("the server module", () => {
     expect(await response.json()).toMatchObject({ error: "not-signed", message: expect.stringMatching(/S3_BUCKET/) });
   });
 
+  it("words only its own problems, never another error's message", async () => {
+    const answer = s3Server({
+      root,
+      env: { S3_ACCESS_KEY_ID: "KEY", S3_SECRET_ACCESS_KEY: "SECRET", S3_BUCKET: "parish-media" },
+    });
+    const broken = new Request("https://parish.example/api/goodfellow/plugins/goodfellow-plugin-s3/sign", {
+      method: "POST",
+      body: "{not json",
+    });
+    const response = await answer(broken, { path: "sign", editor });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "not-signed", message: "S3 storage couldn't sign that request." });
+    const refused = await answer(ask({ action: "delete-everything" }), { path: "sign", editor });
+    expect(await refused.json()).toMatchObject({ message: "S3 storage was asked for something it doesn't sign." });
+  });
+
   it("answers only signed-in editors, and leaves it to the CI without keys", async () => {
     const withKeys = s3Server({
       root,
