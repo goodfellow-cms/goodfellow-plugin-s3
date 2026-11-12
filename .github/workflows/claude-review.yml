@@ -246,7 +246,10 @@ jobs:
         timeout-minutes: 2
         env:
           BASE: ${{ needs.choose.outputs.base }}
-        run: echo "sha=$(git merge-base "refs/remotes/origin/$BASE" HEAD)" >> "$GITHUB_OUTPUT"
+        # On its own line, so a merge base that can't be found fails the step, which the review waits on.
+        run: |
+          base=$(git merge-base "refs/remotes/origin/$BASE" HEAD)
+          echo "sha=$base" >> "$GITHUB_OUTPUT"
 
       # A step that runs out of time fails, which continue-on-error catches; the job running out would be cancelled,
       # failing CI, so the review stops well before the job's own limit.
