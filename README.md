@@ -175,6 +175,14 @@ Pushing a `v` tag is what starts a release, so keep that to maintainers, though 
 
 `peerDependencies` names the Goodfellow releases it works with, as a range on `@goodfellow-cms/core` (`>=0.6.0 <1.0.0`). Goodfellow's Plugins screen offers a release only to sites on a Goodfellow release in that range, so narrow it in a new version if a Goodfellow release breaks the plugin. A caret range such as `^0.6.0` would mean 0.6 alone.
 
+## Reviews
+
+Pull requests are reviewed by CodeRabbit and by Claude. Claude's review ([`claude-review.yml`](.github/workflows/claude-review.yml)) runs Claude Code's `/code-review` once CI has passed on a pull request that's ready for review, on the Claude subscription behind the `CLAUDE_CODE_OAUTH_TOKEN` secret (made with `claude setup-token`). It reads the change at the commit it was chosen for, so a push while it waits or runs doesn't change what it reviews. What it finds is posted as comments on the lines (or on the file, where a line isn't part of the change), with one comment saying how the review went, what it used, and any tool it was refused (or, where GitHub dropped a waiting review because a newer one joined the queue, that it was dropped and how to ask again), which lists any finding about a line outside the change, or one GitHub didn't take as a comment, and says that the `no-claude-review` label passes the status where one doesn't apply.
+
+A comment whose first line is `/claude-review`, in any case, asks again (`/claude-review high` at that level, for that review only), as does adding the `claude-review` label, which the review takes off afterwards, when the person asking can push here; adding `claude-review:low`, `:high`, or `:xhigh` asks at that level, taking off any other level label, and the level then holds for the pull request's later reviews, `medium` otherwise. The `no-claude-review` label skips the review CI starts. It never reviews pull requests from forks, whose runs get no secrets, and CI doesn't start one for a push by a bot, which Claude Code's action refuses; `/claude-review` still asks.
+
+[`review-status.yml`](.github/workflows/review-status.yml) says how each pull request's reviews stand as two statuses, neither of them required: "CodeRabbit reviewed", which fails until CodeRabbit has reviewed the latest commit (comment `@coderabbitai review` to ask) and then until its comments are resolved, and "Claude reviewed", which carries Claude's latest review to later commits and fails while that review couldn't run or didn't finish or listed findings in its comment, and then until Claude's comments are resolved.
+
 ## License
 
 MIT

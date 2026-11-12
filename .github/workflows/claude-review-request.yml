@@ -1,0 +1,72 @@
+# Starts a Claude review when someone comments `/claude-review` (or `/claude-review high`) on a pull request.
+#
+# A comment's run is the main branch's copy of this workflow, with this repository's secrets, so it never reads the
+# pull request's code: it only checks the request (the comment's first line, that the commenter can push here, and
+# that the pull request is open and from a branch here) and starts the pull request's own copy of claude-review.yml
+# on its branch with workflow_dispatch, which a run's own token may do. That copy runs as a label's request does, with
+# the secrets a branch here gets anyway. See claude-review.yml for the review itself.
+name: Claude review request
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+env:
+  GH_REPO: ${{ github.repository }}
+  PR: ${{ github.event.issue.number }}
+
+jobs:
+  request:
+    # startsWith ignores case, so the script below does too.
+    if: github.event.issue.pull_request && startsWith(github.event.comment.body, '/claude-review')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      issues: write
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Start the pull request's own review
+        env:
+          HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+          ACTOR: ${{ github.event.sender.login }}
+          COMMENT: ${{ github.event.comment.body }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: |
+          if [ "$HAS_TOKEN" != "true" ]; then echo "::notice::No CLAUDE_CODE_OAUTH_TOKEN secret, so no review."; exit 0; fi
+          # The comment's first line alone, so a comment that only mentions the command further down asks nothing.
+          first=$(head -n 1 <<<"$COMMENT" | tr -d '\r')
+          # Whatever its case, as the job's condition reads it, so /Claude-Review High asks too.
+          shopt -s nocasematch
+          if ! [[ "$first" =~ ^/claude-review([[:space:]]+(low|medium|high|xhigh))?[[:space:]]*$ ]]; then
+            echo "::notice::Not a request for a review."; exit 0
+          fi
+          shopt -u nocasematch
+          level=${BASH_REMATCH[2],,}
+          permission=$(gh api "repos/$GH_REPO/collaborators/$ACTOR/permission" --jq .permission) || permission=none
+          case "$permission" in admin | maintain | write) ;; *)
+            echo "::notice::$ACTOR can't push here, so they can't start a review."; exit 0 ;;
+          esac
+          if ! pr=$(gh pr view "$PR" --json headRefName,headRefOid,isCrossRepository,state); then
+            gh pr comment "$PR" --body "Couldn't read this pull request to start the review. Comment \`/claude-review\` again to try again."
+            exit 0
+          fi
+          if jq -e '.isCrossRepository or .state != "OPEN"' <<<"$pr" > /dev/null; then
+            echo "::notice::Only open pull requests from branches here are reviewed."; exit 0
+          fi
+          gh api --method POST "repos/$GH_REPO/issues/comments/$COMMENT_ID/reactions" -f content=eyes > /dev/null || true
+          if ! said=$(gh workflow run claude-review.yml --ref "$(jq -r .headRefName <<<"$pr")" -f pr="$PR" -f level="$level" 2>&1); then
+            echo "::warning::GitHub didn't start the review: $said"
+            # Marked as a review that couldn't run, so the "Claude reviewed" status counts it, a bot's pull request's too.
+            mark="<!-- claude-review sha=$(jq -r .headRefOid <<<"$pr") outcome=failed -->"
+            # GitHub refuses a dispatch the branch's copy doesn't take (422) or where the branch has none (404).
+            if [[ $said == *"HTTP 422"* || $said == *"HTTP 404"* || $said == *"could not find any workflows"* ]]; then
+              gh pr comment "$PR" --body "$mark"$'\n'"This branch's copy of \`claude-review.yml\` can't be asked by a comment yet. Merge the main branch into it and comment \`/claude-review\` again, or add the \`claude-review\` label."
+            else
+              gh pr comment "$PR" --body "$mark"$'\n'"GitHub didn't start the review ([the run]($GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID) says why). Comment \`/claude-review\` again to try again."
+            fi
+          fi

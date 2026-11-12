@@ -1,0 +1,251 @@
+# Says on each pull request how its reviews stand, as two commit statuses, neither of them required, so neither
+# ever stops a merge:
+#
+# - "CodeRabbit reviewed": whether CodeRabbit has reviewed the latest commit and every comment it left has been
+#   dealt with. CodeRabbit's own check ends neutral when it's rate limited, and a skipped or neutral check looks the
+#   same as a passing one in the list of pull requests, so this one fails until CodeRabbit's check on the head commit
+#   ends in success (ask for the review with a comment saying "@coderabbitai review"), and then until every review
+#   thread CodeRabbit started is resolved, outdated ones included. CodeRabbit can't say that itself: its automatic
+#   approvals give a review, not a check. It passes drafts (CodeRabbit reviews them once they're ready), Dependabot's
+#   pull requests, and pull requests labelled no-coderabbit, such as ones over CodeRabbit's file limit.
+# - "Claude reviewed": how Claude's latest review of the pull request went (claude-review.yml), set only once the
+#   CLAUDE_CODE_OAUTH_TOKEN secret exists. Claude reviews a pull request once by itself, so the status carries that
+#   review's result to later commits, naming the commit reviewed: it fails while the review couldn't run or didn't
+#   finish (comment "/claude-review" to try again), and then until every review thread Claude started is resolved,
+#   outdated ones included. It's pending until the first review, which starts once CI passes, and passes drafts,
+#   Dependabot's pull requests, pull requests from forks, and pull requests labelled no-claude-review.
+#
+# GitHub starts no workflow when a thread is resolved, so a schedule checks open pull requests every ten minutes,
+# and it can be run by hand (Actions → Review status → Run workflow), as claude-review.yml does once a review ends.
+# It sets a status only when it changes.
+#
+# Every run, whatever started it, checks every open pull request, one run at a time: a run never reads while another
+# is about to write, and where GitHub drops a waiting run for a newer one, the newer one checks everything too.
+#
+# Where open pull requests share a head commit, each status says what the one furthest from passing needs.
+#
+# It runs none of the pull request's code: it only reads the pull request, its checks, comments, and review threads
+# through GitHub's API and sets the statuses, so it uses pull_request_target, which can set statuses on pull requests
+# from forks too. Like check_run and schedule, that runs the workflow as the default branch has it. Nothing from the
+# event reaches the script.
+name: Review status
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft, labeled, unlabeled]
+  check_run:
+    types: [completed]
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  status:
+    # Every check run on the repository starts this workflow; only CodeRabbit's matter.
+    if: github.event_name != 'check_run' || github.event.check_run.app.slug == 'coderabbitai'
+    # On the job, not the workflow: a workflow's group is joined before its jobs' conditions are read, so every other
+    # app's check run would join it with a run that does nothing, and could replace a waiting one that would have.
+    # A skipped job never joins its group.
+    concurrency:
+      group: review-status
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    # A call that hangs would hold the group, and every status with it, for GitHub's six hours.
+    timeout-minutes: 10
+    permissions:
+      checks: read
+      contents: read
+      issues: read
+      pull-requests: read
+      statuses: write
+    steps:
+      - name: Set the statuses
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          # Whether Claude reviews here at all; the secret itself never reaches the script.
+          CLAUDE_REVIEWS: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          shopt -s inherit_errexit
+
+          report() { # context sha state description url
+            local description="${4:0:140}" current
+            # Every run checks every open pull request, so a status is set only when it changes. The combined status
+            # gives each context's latest, however many statuses the commit has.
+            current=$(gh api --paginate --slurp "repos/$REPO/commits/$2/status?per_page=100" |
+              jq -r --arg context "$1" '[.[].statuses[] | select(.context == $context)][0] // {}
+                | "\(.state) \(.description) \(.target_url)"')
+            if [ "$current" = "$3 $description $5" ]; then echo "$1 on $2: still $3 ($description)"; return; fi
+            gh api --method POST "repos/$REPO/statuses/$2" \
+              -f state="$3" -f context="$1" -f description="$description" -f target_url="$5" >/dev/null
+            echo "$1 on $2: $3 ($description)"
+          }
+
+          open_threads() { # pull request number, author: the address of each unresolved thread the author started
+            gh api graphql --paginate -f owner="${REPO%%/*}" -f name="${REPO#*/}" -F number="$1" -f query='
+              query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
+                repository(owner: $owner, name: $name) {
+                  pullRequest(number: $number) {
+                    reviewThreads(first: 100, after: $endCursor) {
+                      pageInfo { hasNextPage endCursor }
+                      nodes { isResolved comments(first: 1) { nodes { url author { login } } } }
+                    }
+                  }
+                }
+              }' --jq '.data.repository.pullRequest.reviewThreads.nodes[]
+                | select(.isResolved | not) | .comments.nodes[0]
+                | select(.author.login == "'"$2"'" or .author.login == "'"$2"'[bot]") | .url'
+          }
+
+          threads_result() { # reviewer's name, pull request number, author, passing description, address
+            local threads count
+            threads=$(open_threads "$2" "$3")
+            count=$(grep -c . <<<"$threads" || true)
+            if [ "$count" -eq 0 ]; then
+              printf '%s\n' success "$4" "$5"
+            elif [ "$count" -eq 1 ]; then
+              printf '%s\n' failure "1 of $1's comments is open: fix it or reply, then resolve it" \
+                "$(head -n 1 <<<"$threads")"
+            else
+              printf '%s\n' failure "$count of $1's comments are open: fix each or reply, then resolve it" \
+                "$(head -n 1 <<<"$threads")"
+            fi
+          }
+
+          coderabbit() { # pull request (JSON): its state, description, and address, a line each
+            local pr="$1" number head url
+            number=$(jq -r .number <<<"$pr")
+            head=$(jq -r .head.sha <<<"$pr")
+            url=$(jq -r .html_url <<<"$pr")
+            if jq -e '.labels | any(.name == "no-coderabbit")' <<<"$pr" >/dev/null; then
+              printf '%s\n' success "Not reviewed by CodeRabbit: labelled no-coderabbit" "$url"; return
+            fi
+            if jq -e .draft <<<"$pr" >/dev/null; then
+              printf '%s\n' success "A draft: CodeRabbit reviews it once it's ready" "$url"; return
+            fi
+            if [ "$(jq -r .user.login <<<"$pr")" = "dependabot[bot]" ]; then
+              printf '%s\n' success "Dependabot's: not reviewed by CodeRabbit" "$url"; return
+            fi
+            local run status conclusion title link
+            run=$(gh api "repos/$REPO/commits/$head/check-runs?check_name=CodeRabbit&filter=latest" \
+              --jq '[.check_runs[] | select(.app.slug == "coderabbitai")] | sort_by(.started_at) | last // empty')
+            if [ -z "$run" ]; then
+              printf '%s\n' pending "Waiting for CodeRabbit" "$url"; return
+            fi
+            status=$(jq -r .status <<<"$run")
+            conclusion=$(jq -r '.conclusion // ""' <<<"$run")
+            title=$(jq -r '.output.title // ""' <<<"$run")
+            link=$(jq -r .html_url <<<"$run")
+            if [ "$status" != completed ]; then
+              printf '%s\n' pending "CodeRabbit is reviewing this commit" "$link"
+            elif [ "$conclusion" = success ]; then
+              threads_result CodeRabbit "$number" coderabbitai \
+                "CodeRabbit reviewed this commit, and its comments are resolved" "$link"
+            elif [ "$conclusion" = skipped ]; then
+              # Such as a pull request over CodeRabbit's file limit, which asking again won't change.
+              printf '%s\n' failure "Not reviewed: ${title:-skipped}. Label it no-coderabbit if it can't be" "$link"
+            else
+              printf '%s\n' failure "Not reviewed: ${title:-$conclusion}. Comment @coderabbitai review" "$link"
+            fi
+          }
+
+          claude() { # pull request (JSON): its state, description, and address, a line each
+            local pr="$1" number head url
+            number=$(jq -r .number <<<"$pr")
+            head=$(jq -r .head.sha <<<"$pr")
+            url=$(jq -r .html_url <<<"$pr")
+            if jq -e '.labels | any(.name == "no-claude-review")' <<<"$pr" >/dev/null; then
+              printf '%s\n' success "Not reviewed by Claude: labelled no-claude-review" "$url"; return
+            fi
+            if jq -e .draft <<<"$pr" >/dev/null; then
+              printf '%s\n' success "A draft: Claude reviews it once it's ready" "$url"; return
+            fi
+            if [ "$(jq -r .head.repo.full_name <<<"$pr")" != "$REPO" ]; then
+              printf '%s\n' success "From a fork: Claude reviews only branches here" "$url"; return
+            fi
+            # The latest review's own comment, which claude-review.yml marks with the commit and how it went, leaving
+            # out requests GitHub dropped while they waited (replaced), whose newer review says how it stands.
+            local latest sha outcome link updated short
+            latest=$(gh api --paginate "repos/$REPO/issues/$number/comments?per_page=100" --jq '.[]
+              | select(.user.login == "github-actions[bot]")
+              | (.body | capture("^<!-- claude-review sha=(?<sha>[0-9a-f]{40}) outcome=(?<outcome>[a-z]+) -->")?) as $m
+              | select($m != null and $m.outcome != "replaced") | "\($m.sha) \($m.outcome) \(.html_url) \(.updated_at)"' | tail -n 1)
+            if [ -z "$latest" ]; then
+              # Claude Code's action doesn't run for bots, so CI never reviews a bot's pull request by itself. One
+              # reviewed when asked with /claude-review counts like any other, so this comes after its comment.
+              if [ "$(jq -r .user.login <<<"$pr")" = "dependabot[bot]" ]; then
+                printf '%s\n' success "Dependabot's: not reviewed by Claude" "$url"
+              elif [ "$(jq -r .user.type <<<"$pr")" = Bot ]; then
+                printf '%s\n' success "A bot's: Claude reviews it when asked with /claude-review" "$url"
+              else
+                printf '%s\n' pending "Waiting for Claude, who reviews it once CI passes" "$url"
+              fi
+              return
+            fi
+            read -r sha outcome link updated <<<"$latest"
+            short=${sha:0:7}
+            # Said of a later commit, so it's clear the review was of an earlier one.
+            local of="this commit"
+            if [ "$sha" != "$head" ]; then of="$short"; fi
+            case "$outcome" in
+              reviewing)
+                # A review that ended without saying so, such as one whose runner was lost.
+                if [ $(( $(date +%s) - $(date -d "$updated" +%s) )) -gt 7200 ]; then
+                  printf '%s\n' failure "Claude's review of $of didn't finish. Comment /claude-review" "$link"
+                else
+                  printf '%s\n' pending "Claude is reviewing $of" "$link"
+                fi ;;
+              reviewed)
+                threads_result Claude "$number" github-actions \
+                  "Claude reviewed $of, and its comments are resolved" "$link" ;;
+              noted)
+                printf '%s\n' failure "Claude raised findings outside the change in $of: see its comment" "$link" ;;
+              *)
+                printf '%s\n' failure "Claude couldn't review $of. Comment /claude-review to try again" "$link" ;;
+            esac
+          }
+
+          refresh() { # status context, the function that evaluates it, commit, then the open pull requests at it
+            # A status belongs to a commit, so where several open pull requests have the same head, it says what
+            # the one furthest from passing needs, naming it.
+            local context="$1" evaluate="$2" sha="$3" number pr found=0 rank best=0 state description url first
+            local evaluated
+            local -a result
+            shift 3
+            for number in "$@"; do
+              # As listed at the start of the run, read once for both statuses; a pull request that moves on
+              # meanwhile is reported on its new head by the run its push starts.
+              pr=${listed[$number]}
+              found=$((found + 1))
+              evaluated=$("$evaluate" "$pr")
+              mapfile -t result <<<"$evaluated"
+              case "${result[0]}" in failure) rank=3 ;; pending) rank=2 ;; *) rank=1 ;; esac
+              if [ "$rank" -gt "$best" ]; then
+                best=$rank state="${result[0]}" description="${result[1]}" url="${result[2]}" first="$number"
+              fi
+            done
+            if [ "$found" -eq 0 ]; then return; fi
+            if [ "$found" -gt 1 ]; then description="#$first: $description"; fi
+            report "$context" "$sha" "$state" "$description" "$url"
+          }
+
+          # Every open pull request, by its head, listed whole, so none is read again. Listed before the loop, so a
+          # failure to list them fails the run.
+          list=$(gh api --paginate "repos/$REPO/pulls?state=open&per_page=100" --jq '.[] | tojson')
+          declare -A listed
+          while IFS= read -r pr; do
+            if [ -n "$pr" ]; then listed[$(jq -r .number <<<"$pr")]=$pr; fi
+          done <<<"$list"
+          heads=$(for pr in "${listed[@]}"; do jq -r '"\(.head.sha) \(.number)"' <<<"$pr"; done)
+          for sha in $(cut -d ' ' -f 1 <<<"$heads" | sort -u); do
+            numbers=$(awk -v sha="$sha" '$1 == sha { print $2 }' <<<"$heads")
+            # shellcheck disable=SC2086 # one argument a pull request
+            refresh "CodeRabbit reviewed" coderabbit "$sha" $numbers
+            if [ "$CLAUDE_REVIEWS" = true ]; then
+              # shellcheck disable=SC2086
+              refresh "Claude reviewed" claude "$sha" $numbers
+            fi
+          done

@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+    # As GitHub's default, and when a draft is marked ready, so its Claude review runs.
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions: {}
 
@@ -43,3 +45,19 @@ jobs:
       - run: npm run build
       # The manifest the build writes must be the one committed, which the Plugins screen reads from npm.
       - run: git diff --exit-code goodfellow-plugin.json
+
+  # Claude's review, once everything else has passed, so it never reads code that's about to change to fix CI. It
+  # reviews a pull request once by itself; see claude-review.yml for asking again, and the labels that change it.
+  # What it finds is the "Claude reviewed" status (review-status.yml), never this run's result. Each of its jobs
+  # takes only the permissions it needs from these: Claude's own, only reading.
+  claude-review:
+    needs: [audit, check]
+    if: github.event_name == 'pull_request'
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: write
+      issues: write
+    uses: ./.github/workflows/claude-review.yml
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
