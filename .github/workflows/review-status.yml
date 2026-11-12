@@ -166,12 +166,13 @@ jobs:
             if [ "$(jq -r .head.repo.full_name <<<"$pr")" != "$REPO" ]; then
               printf '%s\n' success "From a fork: Claude reviews only branches here" "$url"; return
             fi
-            # The latest review's own comment, which claude-review.yml marks with the commit and how it went.
+            # The latest review's own comment, which claude-review.yml marks with the commit and how it went, leaving
+            # out requests GitHub dropped while they waited (replaced), whose newer review says how it stands.
             local latest sha outcome link updated short
             latest=$(gh api --paginate "repos/$REPO/issues/$number/comments?per_page=100" --jq '.[]
               | select(.user.login == "github-actions[bot]")
               | (.body | capture("^<!-- claude-review sha=(?<sha>[0-9a-f]{40}) outcome=(?<outcome>[a-z]+) -->")?) as $m
-              | select($m != null) | "\($m.sha) \($m.outcome) \(.html_url) \(.updated_at)"' | tail -n 1)
+              | select($m != null and $m.outcome != "replaced") | "\($m.sha) \($m.outcome) \(.html_url) \(.updated_at)"' | tail -n 1)
             if [ -z "$latest" ]; then
               # Claude Code's action doesn't run for bots, so CI never reviews a bot's pull request by itself. One
               # reviewed when asked with /claude-review counts like any other, so this comes after its comment.

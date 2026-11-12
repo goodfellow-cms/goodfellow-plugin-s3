@@ -190,8 +190,9 @@ jobs:
       skipped: ${{ steps.still.outputs.skipped }}
       usage: ${{ steps.usage.outputs.text }}
     steps:
-      # Reviews of one pull request wait their turn here, so CI's review checks again, once its turn comes, that no
-      # review that ran meanwhile has made it unneeded: one whose finish has labelled the pull request, or one that
+      # Reviews of one pull request wait their turn here, one at a time: GitHub drops a waiting review when a newer
+      # one joins the queue, and its finish says so (outcome=replaced). CI's review checks again, once its turn
+      # comes, that no review that ran meanwhile has made it unneeded: one whose finish has labelled the pull request, or one that
       # started before this one and still says it's reviewing, since its finish labels it only once this slot is free.
       # Each review's comment is posted as it's chosen, so an earlier comment is an earlier review.
       - name: Check it's still wanted
@@ -301,6 +302,18 @@ jobs:
     # Every step runs whatever the one before did, and none fails CI, so the comment and the status always say how
     # the review went.
     steps:
+      # A review GitHub dropped while it waited, because a newer one joined the queue, ran no step at all, unlike
+      # one cancelled once it had started. Where the run's jobs can't be read, it counts as one that didn't finish.
+      - name: Check whether it ever started
+        id: started
+        if: always() && needs.review.result == 'cancelled'
+        continue-on-error: true
+        timeout-minutes: 2
+        run: |
+          steps=$(gh api --paginate "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+            --jq '.jobs[] | select(.name == "review" or (.name | endswith(" / review"))) | .steps | length')
+          if [ "$steps" = 0 ]; then echo "replaced=true" >> "$GITHUB_OUTPUT"; fi
+
       # What Claude found goes on the lines it's about in the reviewed commit, or on the file where the line isn't
       # part of the change; anything GitHub refuses on both (422) is about a line outside the change, and anything it
       # didn't take for another reason, even after waiting once, is listed apart in the review's comment.
@@ -413,6 +426,7 @@ jobs:
         timeout-minutes: 2
         env:
           RESULT: ${{ needs.review.result }}
+          REPLACED: ${{ steps.started.outputs.replaced }}
           OUTCOME: ${{ needs.review.outputs.outcome }}
           POSTED: ${{ steps.post.outputs.done }}
           USAGE: ${{ needs.review.outputs.usage }}
@@ -443,6 +457,10 @@ jobs:
           elif [ "$RESULT" = success ] && [ "$OUTCOME" = success ]; then
             outcome=failed
             body="Claude reviewed $short at **$LEVEL** but didn't say what it found in a form that could be posted ([the run]($RUN_URL)). Comment \`/claude-review\` to try again."
+          elif [ "$RESULT" = cancelled ] && [ "$REPLACED" = true ]; then
+            # The status passes over this comment, so the newer review's says how the pull request stands.
+            outcome=replaced
+            body="This request for Claude's review of $short at **$LEVEL** was dropped while it waited, since GitHub keeps only the newest of the reviews waiting for one that's running ([the run]($RUN_URL)). Comment \`/claude-review $LEVEL\` to ask for it again."
           elif [ "$RESULT" = cancelled ]; then
             outcome=failed
             body="Claude's review of $short at **$LEVEL** didn't finish ([the run]($RUN_URL)). Comment \`/claude-review\` to try again."

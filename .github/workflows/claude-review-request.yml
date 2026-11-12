@@ -51,7 +51,7 @@ jobs:
           case "$permission" in admin | maintain | write) ;; *)
             echo "::notice::$ACTOR can't push here, so they can't start a review."; exit 0 ;;
           esac
-          if ! pr=$(gh pr view "$PR" --json headRefName,isCrossRepository,state); then
+          if ! pr=$(gh pr view "$PR" --json headRefName,headRefOid,isCrossRepository,state); then
             gh pr comment "$PR" --body "Couldn't read this pull request to start the review. Comment \`/claude-review\` again to try again."
             exit 0
           fi
@@ -61,10 +61,12 @@ jobs:
           gh api --method POST "repos/$GH_REPO/issues/comments/$COMMENT_ID/reactions" -f content=eyes > /dev/null || true
           if ! said=$(gh workflow run claude-review.yml --ref "$(jq -r .headRefName <<<"$pr")" -f pr="$PR" -f level="$level" 2>&1); then
             echo "::warning::GitHub didn't start the review: $said"
+            # Marked as a review that couldn't run, so the "Claude reviewed" status counts it, a bot's pull request's too.
+            mark="<!-- claude-review sha=$(jq -r .headRefOid <<<"$pr") outcome=failed -->"
             # GitHub refuses a dispatch the branch's copy doesn't take (422) or where the branch has none (404).
             if [[ $said == *"HTTP 422"* || $said == *"HTTP 404"* || $said == *"could not find any workflows"* ]]; then
-              gh pr comment "$PR" --body "This branch's copy of \`claude-review.yml\` can't be asked by a comment yet. Merge the main branch into it and comment \`/claude-review\` again, or add the \`claude-review\` label."
+              gh pr comment "$PR" --body "$mark"$'\n'"This branch's copy of \`claude-review.yml\` can't be asked by a comment yet. Merge the main branch into it and comment \`/claude-review\` again, or add the \`claude-review\` label."
             else
-              gh pr comment "$PR" --body "GitHub didn't start the review ([the run]($GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID) says why). Comment \`/claude-review\` again to try again."
+              gh pr comment "$PR" --body "$mark"$'\n'"GitHub didn't start the review ([the run]($GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID) says why). Comment \`/claude-review\` again to try again."
             fi
           fi
