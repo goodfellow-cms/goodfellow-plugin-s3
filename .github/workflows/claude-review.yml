@@ -84,6 +84,7 @@ jobs:
       - name: Choose what to review
         id: choose
         continue-on-error: true
+        timeout-minutes: 2
         env:
           HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
           ADDED: ${{ github.event.label.name }}
@@ -144,6 +145,7 @@ jobs:
         id: comment
         if: steps.choose.outputs.run == 'true'
         continue-on-error: true
+        timeout-minutes: 2
         env:
           LEVEL: ${{ steps.choose.outputs.level }}
           SHA: ${{ steps.choose.outputs.sha }}
@@ -182,6 +184,7 @@ jobs:
         id: still
         if: github.event_name == 'pull_request' && github.event.action != 'labeled'
         continue-on-error: true
+        timeout-minutes: 2
         env:
           GH_TOKEN: ${{ github.token }}
           OWN: ${{ needs.choose.outputs.comment }}
@@ -205,15 +208,19 @@ jobs:
         id: checkout
         if: steps.still.outputs.skipped != 'true'
         continue-on-error: true
+        timeout-minutes: 5
         with:
           ref: ${{ needs.choose.outputs.sha }}
           fetch-depth: 0
           persist-credentials: false
 
+      # A step that runs out of time fails, which continue-on-error catches; the job running out would be cancelled,
+      # failing CI, so the review stops well before the job's own limit.
       - name: Review
         id: claude
         if: steps.checkout.outcome == 'success'
         continue-on-error: true
+        timeout-minutes: 35
         uses: anthropics/claude-code-action@c0949c50a78c1ec8ce2647db36629b870e715d0c # v1.0.268
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -236,6 +243,7 @@ jobs:
         id: usage
         if: always() && steps.still.outputs.skipped != 'true'
         continue-on-error: true
+        timeout-minutes: 1
         env:
           EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
         run: |
@@ -259,7 +267,7 @@ jobs:
     needs: [choose, review]
     if: always() && needs.choose.outputs.run == 'true' && needs.choose.outputs.comment != ''
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     permissions:
       actions: write
       pull-requests: write
@@ -275,6 +283,7 @@ jobs:
         id: post
         if: always() && needs.review.outputs.outcome == 'success'
         continue-on-error: true
+        timeout-minutes: 5
         env:
           FINDINGS: ${{ needs.review.outputs.findings }}
           SHA: ${{ needs.choose.outputs.sha }}
@@ -304,6 +313,7 @@ jobs:
       - name: Remember the review
         if: always() && steps.post.outputs.done == 'true'
         continue-on-error: true
+        timeout-minutes: 2
         run: |
           gh label create claude-reviewed --color ededed --description "Claude has reviewed it; comment /claude-review for another review" 2> /dev/null || true
           gh pr edit "$PR" --add-label claude-reviewed
@@ -313,6 +323,7 @@ jobs:
       - name: Take the request off
         if: always() && github.event.action == 'labeled'
         continue-on-error: true
+        timeout-minutes: 2
         env:
           ADDED: ${{ github.event.label.name }}
         run: |
@@ -353,6 +364,7 @@ jobs:
       - name: Take the comment back
         if: always() && needs.review.outputs.skipped == 'true'
         continue-on-error: true
+        timeout-minutes: 2
         env:
           COMMENT: ${{ needs.choose.outputs.comment }}
         run: gh api --method DELETE "repos/$GH_REPO/issues/comments/$COMMENT"
@@ -360,6 +372,7 @@ jobs:
       - name: Say how it went
         if: always() && needs.review.outputs.skipped != 'true'
         continue-on-error: true
+        timeout-minutes: 2
         env:
           RESULT: ${{ needs.review.result }}
           OUTCOME: ${{ needs.review.outputs.outcome }}
@@ -397,6 +410,7 @@ jobs:
       - name: Refresh the status
         if: always()
         continue-on-error: true
+        timeout-minutes: 2
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: gh workflow run review-status.yml --ref "$DEFAULT_BRANCH"
