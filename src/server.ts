@@ -8,7 +8,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { SignError } from "./errors.js";
-import { MEDIA_STORAGE_FILE, parseSettings, parseStoredMedia, SETTINGS_FILE } from "./settings.js";
+import { MEDIA_STORAGE_FILE, mediaKey, parseSettings, parseStoredMedia, SETTINGS_FILE } from "./settings.js";
 import { keysFrom, signInput, signRequests } from "./signing.js";
 import type { PluginServerContext } from "./types.js";
 
@@ -48,7 +48,13 @@ export function s3Server(options: { root?: string; env?: Record<string, string |
       // versioning covers both, as it does deletes.
       if (input.action === "upload" && context.editor.role !== "owner") {
         const stored = parseStoredMedia(await readFile(join(root, MEDIA_STORAGE_FILE), "utf8").catch(() => undefined));
-        const taken = input.files.find(({ address }) => stored?.files[address] !== undefined);
+        // Compared by the object each address signs for, since `/media/%73ermon.mp4` is `/media/sermon.mp4`'s.
+        const storedKeys = new Set(Object.keys(stored?.files ?? {}).map(mediaKey));
+        storedKeys.delete(undefined);
+        const taken = input.files.find(({ address }) => {
+          const key = mediaKey(address);
+          return key !== undefined && storedKeys.has(key);
+        });
         if (taken) {
           return json(403, {
             error: "not-allowed",

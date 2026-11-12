@@ -73,7 +73,7 @@ describe("the server module", () => {
         version: 1,
         plugin: "goodfellow-plugin-s3",
         url: "https://media.example.org",
-        files: { "/media/sermon.mp4": { size: 10 } },
+        files: { "/media/sermon.mp4": { size: 10 }, "/media/%70salm.mp3": { size: 5 }, "/media/../x": { size: 1 } },
       }),
     );
     try {
@@ -93,6 +93,14 @@ describe("the server module", () => {
       });
       const owner = { login: "olive", role: "owner" as const };
       expect((await answer(ask({ action: "upload", files }), { path: "sign", editor: owner })).status).toBe(200);
+      // However the address is spelled, it's the same object.
+      for (const address of ["/media/%73ermon.mp4", "/media/sermon%2Emp4"]) {
+        const spelled = { action: "upload", files: [{ address, type: "video/mp4", size: 1 }] };
+        expect((await answer(ask(spelled), { path: "sign", editor })).status).toBe(403);
+      }
+      // A stored address spelled with escapes is the same object as the plain one, and one it can't keep stops nothing.
+      const psalm = { action: "upload", files: [{ address: "/media/psalm.mp3", type: "audio/mpeg", size: 1 }] };
+      expect((await answer(ask(psalm), { path: "sign", editor })).status).toBe(403);
       // New files are still the editors' to upload.
       const fresh = { action: "upload", files: files.slice(0, 1) };
       expect((await answer(ask(fresh), { path: "sign", editor })).status).toBe(200);

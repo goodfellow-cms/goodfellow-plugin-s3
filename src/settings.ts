@@ -146,15 +146,22 @@ function keyPart(part: string): string | undefined {
   return decoded;
 }
 
+/**
+ * The file a media address names, decoded as its key in the bucket is, without the site's folder:
+ * `/media/%73ermon.mp4` and `/media/sermon.mp4` are both `sermon.mp4`. Undefined for an address S3 storage
+ * can't keep.
+ */
+export function mediaKey(address: string): string | undefined {
+  if (!/^\/media\/[\w.~%-]+(\/[\w.~%-]+)*$/.test(address)) return undefined;
+  const parts = address.slice("/media/".length).split("/").map(keyPart);
+  return parts.some((part) => part === undefined) ? undefined : parts.join("/");
+}
+
 /** The object's key in the bucket for a media address: `/media/sermon.mp4` is `<folder>sermon.mp4`. */
 export function objectKey(settings: StorageSettings, address: string): string {
-  const parts = /^\/media\/[\w.~%-]+(\/[\w.~%-]+)*$/.test(address)
-    ? address.slice("/media/".length).split("/").map(keyPart)
-    : [undefined];
-  if (parts.some((part) => part === undefined)) {
-    throw new SignError(`${address} isn't a media address S3 storage can keep.`);
-  }
-  return `${settings.folder}${parts.join("/")}`;
+  const key = mediaKey(address);
+  if (key === undefined) throw new SignError(`${address} isn't a media address S3 storage can keep.`);
+  return `${settings.folder}${key}`;
 }
 
 /**
