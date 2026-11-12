@@ -76,6 +76,7 @@ jobs:
       run: ${{ steps.choose.outputs.run }}
       level: ${{ steps.choose.outputs.level }}
       sha: ${{ steps.choose.outputs.sha }}
+      base: ${{ steps.choose.outputs.base }}
       comment: ${{ steps.comment.outputs.id }}
     env:
       GH_TOKEN: ${{ github.token }}
@@ -114,12 +115,15 @@ jobs:
             permission=$(gh api "repos/$GH_REPO/collaborators/$ACTOR/permission" --jq .permission) || permission=none
             case "$permission" in admin | maintain | write) ;; *) skip "$ACTOR can't push here, so they can't start a review." ;; esac
           fi
-          pr=$(gh pr view "$PR" --json headRefOid,headRefName,labels,isCrossRepository,state) ||
+          pr=$(gh pr view "$PR" --json headRefOid,headRefName,baseRefName,labels,isCrossRepository,state) ||
             skip "Couldn't read the pull request, so no review."
           if jq -e '.isCrossRepository or .state != "OPEN"' <<<"$pr" > /dev/null; then
             skip "Only open pull requests from branches here are reviewed."
           fi
           head=$(jq -r .headRefOid <<<"$pr")
+          # The branch it's merged into, from which the review works out where its change starts.
+          base=$(jq -r .baseRefName <<<"$pr")
+          if ! [[ "$base" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ "$base" == *..* ]]; then skip "Couldn't read the branch it's merged into."; fi
           # A dispatch reviews only with the pull request's own copy of this workflow.
           if [ "$EVENT" = "workflow_dispatch" ] && [ "$(jq -r .headRefName <<<"$pr")" != "$GITHUB_REF_NAME" ]; then
             skip "Run this on the pull request's own branch, $(jq -r .headRefName <<<"$pr")."
@@ -152,6 +156,7 @@ jobs:
             echo "run=true"
             echo "level=$level"
             echo "sha=$head"
+            echo "base=$base"
           } >> "$GITHUB_OUTPUT"
 
       # The review's own comment, which says what's happening until it ends.
@@ -205,7 +210,9 @@ jobs:
           OWN: ${{ needs.choose.outputs.comment }}
         run: |
           unneeded() { echo "::notice::$1"; echo "skipped=true" >> "$GITHUB_OUTPUT"; exit 0; }
-          if gh pr view "$PR" --json labels --jq '[.labels[].name] | any(. == "claude-reviewed" or . == "no-claude-review")' | grep -q true; then
+          # A lookup that fails fails the step, which stops the review: it may have been labelled not to run.
+          labelled=$(gh pr view "$PR" --json labels --jq '[.labels[].name] | any(. == "claude-reviewed" or . == "no-claude-review")')
+          if [ "$labelled" = true ]; then
             unneeded "Reviewed meanwhile, or no longer to be reviewed by itself."
           fi
           if [[ "$OWN" =~ ^[0-9]+$ ]]; then
@@ -221,7 +228,8 @@ jobs:
       # A review that fails says so in its comment and the "Claude reviewed" status, never by failing CI.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         id: checkout
-        if: steps.still.outputs.skipped != 'true'
+        # Not after a failed check (which a labelled request, skipping it, never is).
+        if: steps.still.outcome != 'failure' && steps.still.outputs.skipped != 'true'
         continue-on-error: true
         timeout-minutes: 5
         with:
@@ -229,11 +237,22 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # The review reads the change from the commit it was chosen for, never the pull request's live diff, which may
+      # have moved on while it waited, so what it finds is about the commit its comments go on.
+      - name: Find where the change starts
+        id: base
+        if: steps.checkout.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          BASE: ${{ needs.choose.outputs.base }}
+        run: echo "sha=$(git merge-base "refs/remotes/origin/$BASE" HEAD)" >> "$GITHUB_OUTPUT"
+
       # A step that runs out of time fails, which continue-on-error catches; the job running out would be cancelled,
       # failing CI, so the review stops well before the job's own limit.
       - name: Review
         id: claude
-        if: steps.checkout.outcome == 'success'
+        if: steps.base.outcome == 'success'
         continue-on-error: true
         timeout-minutes: 35
         uses: anthropics/claude-code-action@c0949c50a78c1ec8ce2647db36629b870e715d0c # v1.0.268
@@ -244,7 +263,10 @@ jobs:
           # done, before Claude can return its findings as the schema asks, so the review would come back empty.
           prompt: >-
             Review pull request #${{ env.PR }} with the code-review skill at the ${{ needs.choose.outputs.level }}
-            level, as `/code-review ${{ needs.choose.outputs.level }} ${{ env.PR }}` would. Once it's done, return every
+            level, as `/code-review ${{ needs.choose.outputs.level }} ${{ env.PR }}` would, but at the commit it was
+            chosen for, ${{ needs.choose.outputs.sha }}, which this checkout is at: read the change with
+            `git diff ${{ steps.base.outputs.sha }} HEAD`, never `gh pr diff`, since the pull request may have moved on
+            since. Its lines are the lines of the files in this checkout. Once it's done, return every
             finding it reports as the structured output, each with the file and line it names, or no findings if it
             raised none.
           # A comment's request is dispatched with this repository's token, so its run is started by
@@ -257,7 +279,7 @@ jobs:
           claude_args: >-
             --model opus
             --setting-sources user
-            --allowedTools "Skill,Agent,Read,Glob,Grep,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*)"
+            --allowedTools "Skill,Agent,Read,Glob,Grep,Bash(gh pr view:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*)"
             --json-schema '{"type":"object","additionalProperties":false,"required":["findings"],"properties":{"findings":{"type":"array","description":"Every finding of the review, none when it found nothing to raise","items":{"type":"object","additionalProperties":false,"required":["path","line","body"],"properties":{"path":{"type":"string","description":"The file the finding is about, relative to the root of the repository"},"line":{"type":"integer","minimum":1,"description":"The line it is about, in the version of the file in the pull request"},"body":{"type":"string","description":"The finding in Markdown: what is wrong, how it fails, and the fix"}}}}}}'
 
       - name: Count what it used
