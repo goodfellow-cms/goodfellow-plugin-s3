@@ -163,13 +163,6 @@ jobs:
             if jq -e .draft <<<"$pr" >/dev/null; then
               printf '%s\n' success "A draft: Claude reviews it once it's ready" "$url"; return
             fi
-            if [ "$(jq -r .user.login <<<"$pr")" = "dependabot[bot]" ]; then
-              printf '%s\n' success "Dependabot's: not reviewed by Claude" "$url"; return
-            fi
-            # Claude Code's action doesn't run for bots, so CI never reviews another bot's pull request by itself.
-            if [ "$(jq -r .user.type <<<"$pr")" = Bot ]; then
-              printf '%s\n' success "A bot's: Claude reviews it when asked with /claude-review" "$url"; return
-            fi
             if [ "$(jq -r .head.repo.full_name <<<"$pr")" != "$REPO" ]; then
               printf '%s\n' success "From a fork: Claude reviews only branches here" "$url"; return
             fi
@@ -180,7 +173,16 @@ jobs:
               | (.body | capture("^<!-- claude-review sha=(?<sha>[0-9a-f]{40}) outcome=(?<outcome>[a-z]+) -->")?) as $m
               | select($m != null) | "\($m.sha) \($m.outcome) \(.html_url) \(.updated_at)"' | tail -n 1)
             if [ -z "$latest" ]; then
-              printf '%s\n' pending "Waiting for Claude, who reviews it once CI passes" "$url"; return
+              # Claude Code's action doesn't run for bots, so CI never reviews a bot's pull request by itself. One
+              # reviewed when asked with /claude-review counts like any other, so this comes after its comment.
+              if [ "$(jq -r .user.login <<<"$pr")" = "dependabot[bot]" ]; then
+                printf '%s\n' success "Dependabot's: not reviewed by Claude" "$url"
+              elif [ "$(jq -r .user.type <<<"$pr")" = Bot ]; then
+                printf '%s\n' success "A bot's: Claude reviews it when asked with /claude-review" "$url"
+              else
+                printf '%s\n' pending "Waiting for Claude, who reviews it once CI passes" "$url"
+              fi
+              return
             fi
             read -r sha outcome link updated <<<"$latest"
             short=${sha:0:7}
