@@ -314,10 +314,11 @@ jobs:
         env:
           ADDED: ${{ github.event.label.name }}
         run: |
-          # When each request label was added, by event id, which only grows.
+          # When people added each request label, by event id, which only grows. Labels this workflow put back are
+          # left out, so putting one back never makes it a newer request than one someone added since.
           labeled() {
             gh api --paginate "repos/$GH_REPO/issues/$PR/events?per_page=100" \
-              --jq '.[] | select(.event == "labeled" and (.label.name | startswith("claude-review"))) | "\(.id) \(.label.name)"'
+              --jq '.[] | select(.event == "labeled" and (.label.name | startswith("claude-review")) and .actor.login != "github-actions[bot]") | "\(.id) \(.label.name)"'
           }
           history=$(labeled)
           seen=$(awk '$1 > max { max = $1 } END { print max + 0 }' <<<"$history")
