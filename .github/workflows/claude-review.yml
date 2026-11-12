@@ -142,9 +142,12 @@ jobs:
           # With several level labels, such as one added by someone who can't push, which no review then tidied, the
           # one added last counts, as the clean-up after a review keeps it; by event id, which only grows.
           if [ "$(grep -c . <<<"$levels")" -gt 1 ]; then
-            newest=$(gh api --paginate "repos/$GH_REPO/issues/$PR/events?per_page=100" \
-              --jq '.[] | select(.event == "labeled" and .actor.login != "github-actions[bot]") | "\(.id) \(.label.name)"' |
-              sort -n | sed 's/^[0-9]* //' | grep -Fxf <(printf '%s\n' "$levels") | tail -n 1) || newest=""
+            # Read on its own, as a pipeline's status is only its last command's: a failed read would leave no label
+            # newest, and the first one would count.
+            events=$(gh api --paginate "repos/$GH_REPO/issues/$PR/events?per_page=100" \
+              --jq '.[] | select(.event == "labeled" and .actor.login != "github-actions[bot]") | "\(.id) \(.label.name)"') ||
+              skip "Couldn't read when the level labels were added, so no review."
+            newest=$(sort -n <<<"$events" | sed 's/^[0-9]* //' | grep -Fxf <(printf '%s\n' "$levels") | tail -n 1)
             levels=${newest:-$(head -n 1 <<<"$levels")}
           fi
           # A level label on the pull request, then the one just added, then a level asked for, which wins.
