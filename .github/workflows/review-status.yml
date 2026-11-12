@@ -73,8 +73,8 @@ jobs:
             local description="${4:0:140}" current
             # Every run checks every open pull request, so a status is set only when it changes. The combined status
             # gives each context's latest, however many statuses the commit has.
-            current=$(gh api "repos/$REPO/commits/$2/status?per_page=100" |
-              jq -r --arg context "$1" '[.statuses[] | select(.context == $context)][0] // {}
+            current=$(gh api --paginate --slurp "repos/$REPO/commits/$2/status?per_page=100" |
+              jq -r --arg context "$1" '[.[].statuses[] | select(.context == $context)][0] // {}
                 | "\(.state) \(.description) \(.target_url)"')
             if [ "$current" = "$3 $description $5" ]; then echo "$1 on $2: still $3 ($description)"; return; fi
             gh api --method POST "repos/$REPO/statuses/$2" \

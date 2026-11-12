@@ -53,7 +53,6 @@ permissions: {}
 env:
   GH_REPO: ${{ github.repository }}
   PR: ${{ github.event.pull_request.number || inputs.pr }}
-  LEVELS: low medium high xhigh
 
 jobs:
   choose:
@@ -76,7 +75,6 @@ jobs:
       run: ${{ steps.choose.outputs.run }}
       level: ${{ steps.choose.outputs.level }}
       sha: ${{ steps.choose.outputs.sha }}
-      stale: ${{ steps.choose.outputs.stale }}
       comment: ${{ steps.comment.outputs.id }}
     env:
       GH_TOKEN: ${{ github.token }}
@@ -93,12 +91,13 @@ jobs:
           ASKED: ${{ inputs.level }}
         run: |
           skip() { echo "::notice::$1"; echo "run=false" >> "$GITHUB_OUTPUT"; exit 0; }
+          # One whole level, never part of a label's name.
+          is_level() { case "$1" in low | medium | high | xhigh) return 0 ;; *) return 1 ;; esac; }
           if [ "$HAS_TOKEN" != "true" ]; then skip "No CLAUDE_CODE_OAUTH_TOKEN secret, so no review."; fi
-          if [ "$EVENT_ACTION" = "labeled" ] && [ "$ADDED" != "claude-review" ] \
-            && [[ " $LEVELS " != *" ${ADDED#claude-review:} "* ]]; then
+          if [ "$EVENT_ACTION" = "labeled" ] && [ "$ADDED" != "claude-review" ] && ! is_level "${ADDED#claude-review:}"; then
             skip "$ADDED isn't a level, so it starts no review."
           fi
-          if [ -n "$ASKED" ] && [[ " $LEVELS " != *" $ASKED "* ]]; then skip "$ASKED isn't a level."; fi
+          if [ -n "$ASKED" ] && ! is_level "$ASKED"; then skip "$ASKED isn't a level."; fi
           if ! [[ "$PR" =~ ^[0-9]+$ ]]; then skip "$PR isn't a pull request's number."; fi
           # Anyone who can add a label can start a run, but only someone who can push starts a review. A dispatch
           # needs push access already.
@@ -126,22 +125,14 @@ jobs:
           fi
           level=medium
           # A level label on the pull request, then the one just added, then a level asked for, which wins.
-          for label in $(jq -r '.labels[].name' <<<"$pr") "$ADDED"; do
-            case "$label" in claude-review:*) wanted=${label#claude-review:} ;; *) continue ;; esac
-            [[ " $LEVELS " == *" $wanted "* ]] && level=$wanted
-          done
+          while IFS= read -r label; do
+            case "$label" in claude-review:*) is_level "${label#claude-review:}" && level=${label#claude-review:} ;; esac
+          done < <(jq -r '.labels[].name' <<<"$pr"; printf '%s\n' "$ADDED")
           if [ -n "$ASKED" ]; then level=$ASKED; fi
-          # The level labels a newly added one replaces: those on the pull request now, so cleanup never takes off
-          # one added while this review runs.
-          stale=""
-          if [[ "$ADDED" == claude-review:* ]]; then
-            stale=$(jq -r --arg added "$ADDED" '[.labels[].name | select(startswith("claude-review:") and . != $added)] | join(" ")' <<<"$pr")
-          fi
           {
             echo "run=true"
             echo "level=$level"
             echo "sha=$head"
-            echo "stale=$stale"
           } >> "$GITHUB_OUTPUT"
 
       # The review's own comment, which says what's happening until it ends.
@@ -171,11 +162,27 @@ jobs:
       group: claude-review-${{ github.event.pull_request.number || inputs.pr }}
     outputs:
       outcome: ${{ steps.claude.outcome }}
+      skipped: ${{ steps.still.outputs.skipped }}
       usage: ${{ steps.usage.outputs.text }}
     steps:
+      # Reviews of one pull request wait their turn here, so CI's review checks again, once its turn comes, that no
+      # review that ran meanwhile has made it unneeded.
+      - name: Check it's still wanted
+        id: still
+        if: github.event_name == 'pull_request' && github.event.action != 'labeled'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh pr view "$PR" --json labels --jq '[.labels[].name] | any(. == "claude-reviewed" or . == "no-claude-review")' | grep -q true; then
+            echo "::notice::Reviewed meanwhile, or no longer to be reviewed by itself."
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+          fi
+
       # A review that fails says so in its comment and the "Claude reviewed" status, never by failing CI.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         id: checkout
+        if: steps.still.outputs.skipped != 'true'
         continue-on-error: true
         with:
           ref: ${{ needs.choose.outputs.sha }}
@@ -201,7 +208,7 @@ jobs:
 
       - name: Count what it used
         id: usage
-        if: always()
+        if: always() && steps.still.outputs.skipped != 'true'
         env:
           EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
         run: |
@@ -242,19 +249,34 @@ jobs:
           gh label create claude-reviewed --color ededed --description "Claude has reviewed it; comment /claude-review for another review" 2> /dev/null || true
           gh pr edit "$PR" --add-label claude-reviewed
 
-      # The plain request comes off, ready to add again; a level label stays, the only one of its kind.
+      # The plain request comes off, ready to add again. Of the level labels, the one added last stays, read from the
+      # pull request's history, so reviews that end in any order leave the same one.
       - name: Take the request off
         if: always() && github.event.action == 'labeled'
         continue-on-error: true
         env:
           ADDED: ${{ github.event.label.name }}
-          STALE: ${{ needs.choose.outputs.stale }}
         run: |
           if [ "$ADDED" = "claude-review" ]; then gh pr edit "$PR" --remove-label claude-review; fi
-          for label in $STALE; do gh pr edit "$PR" --remove-label "$label"; done
+          levels=$(gh pr view "$PR" --json labels --jq '.labels[].name | select(startswith("claude-review:"))')
+          # The last added of those on the pull request now, so one taken off by hand since never counts.
+          newest=$(gh api --paginate "repos/$GH_REPO/issues/$PR/events?per_page=100" \
+            --jq '.[] | select(.event == "labeled" and (.label.name | startswith("claude-review:"))) | .label.name' |
+            grep -Fxf <(printf '%s\n' "$levels") | tail -n 1 || true)
+          while IFS= read -r label; do
+            if [ -n "$label" ] && [ -n "$newest" ] && [ "$label" != "$newest" ]; then gh pr edit "$PR" --remove-label "$label"; fi
+          done <<<"$levels"
+
+      # A review that turned out to be unneeded takes its comment away again.
+      - name: Take the comment back
+        if: always() && needs.review.outputs.skipped == 'true'
+        continue-on-error: true
+        env:
+          COMMENT: ${{ needs.choose.outputs.comment }}
+        run: gh api --method DELETE "repos/$GH_REPO/issues/comments/$COMMENT"
 
       - name: Say how it went
-        if: always()
+        if: always() && needs.review.outputs.skipped != 'true'
         continue-on-error: true
         env:
           RESULT: ${{ needs.review.result }}
