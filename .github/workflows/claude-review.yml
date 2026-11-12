@@ -225,7 +225,13 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
-          prompt: /code-review ${{ needs.choose.outputs.level }} ${{ env.PR }}
+          # Asked in words rather than as the slash command itself: a slash command's skill ends the session when it's
+          # done, before Claude can return its findings as the schema asks, so the review would come back empty.
+          prompt: >-
+            Review pull request #${{ env.PR }} with the code-review skill at the ${{ needs.choose.outputs.level }}
+            level, as `/code-review ${{ needs.choose.outputs.level }} ${{ env.PR }}` would. Once it's done, return every
+            finding it reports as the structured output, each with the file and line it names, or no findings if it
+            raised none.
           # A comment's request is dispatched with this repository's token, so its run is started by
           # github-actions[bot], which the action refuses unless it's named here. No other bot is, and nothing else
           # starts these runs as one.
@@ -236,7 +242,7 @@ jobs:
           claude_args: >-
             --model opus
             --setting-sources user
-            --allowedTools "Agent,Read,Glob,Grep,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*)"
+            --allowedTools "Skill,Agent,Read,Glob,Grep,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*)"
             --json-schema '{"type":"object","additionalProperties":false,"required":["findings"],"properties":{"findings":{"type":"array","description":"Every finding of the review, none when it found nothing to raise","items":{"type":"object","additionalProperties":false,"required":["path","line","body"],"properties":{"path":{"type":"string","description":"The file the finding is about, relative to the root of the repository"},"line":{"type":"integer","minimum":1,"description":"The line it is about, in the version of the file in the pull request"},"body":{"type":"string","description":"The finding in Markdown: what is wrong, how it fails, and the fix"}}}}}}'
 
       - name: Count what it used
@@ -260,7 +266,11 @@ jobs:
                 ([$m[] | (.inputTokens // 0) + (.cacheReadInputTokens // 0) + (.cacheCreationInputTokens // 0)] | add) as $in
                 | ([$m[] | .outputTokens // 0] | add) as $out
                 | "\($in) tokens read, \($out) written, by \($m | keys | join(", ")); about $\(.total_cost_usd // 0 | . * 100 | round / 100) at API prices; \(.num_turns // 0) turns in \((.duration_ms // 0) / 60000 | round) min."
-              end' <<<"$result" 2> /dev/null) || text="Claude Code reported no usage."
+              end
+            # The tools it was refused, by name only (never what it asked them), so a review that couldn't finish
+            # says why.
+            + ([.permission_denials // [] | .[] | .tool_name // empty | tostring | gsub("[^A-Za-z0-9_:().*-]"; "")]
+              | unique | if length > 0 then " Refused: \(join(", "))." else "" end)' <<<"$result" 2> /dev/null) || text="Claude Code reported no usage."
           echo "text=$text" >> "$GITHUB_OUTPUT"
 
   finish:
