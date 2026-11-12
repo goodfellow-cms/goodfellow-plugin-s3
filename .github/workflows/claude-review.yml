@@ -321,15 +321,21 @@ jobs:
           }
           history=$(labeled)
           seen=$(awk '$1 > max { max = $1 } END { print max + 0 }' <<<"$history")
-          # A label someone added again after the history above was read is a new request, so it stays; so does one
-          # whose history can't be read again.
-          remove() {
+          # Whether someone added the label again after the history above was read.
+          readded() {
             local recent
-            if ! recent=$(labeled); then echo "::notice::Couldn't check $1 again, so it stays."; return; fi
-            if awk -v seen="$seen" -v name="$1" '$1 > seen + 0 && substr($0, index($0, " ") + 1) == name { found = 1 } END { exit !found }' <<<"$recent"; then
-              echo "::notice::$1 was added again meanwhile, so it stays."
-            else
-              gh pr edit "$PR" --remove-label "$1"
+            recent=$(labeled) || return 0
+            awk -v seen="$seen" -v name="$1" '$1 > seen + 0 && substr($0, index($0, " ") + 1) == name { found = 1 } END { exit !found }' <<<"$recent"
+          }
+          # A label added again since is a new request, so it stays, as does one whose history can't be read again.
+          # GitHub can't take a label off only if it's unchanged, so one added again just before it comes off is
+          # put back.
+          remove() {
+            if readded "$1"; then echo "::notice::$1 was added again meanwhile, or couldn't be checked, so it stays."; return; fi
+            gh pr edit "$PR" --remove-label "$1"
+            if readded "$1"; then
+              echo "::notice::$1 was added again as it came off, so it goes back."
+              gh pr edit "$PR" --add-label "$1"
             fi
           }
           if [ "$ADDED" = "claude-review" ]; then remove claude-review; fi
