@@ -52,6 +52,8 @@ jobs:
       group: review-status
       cancel-in-progress: false
     runs-on: ubuntu-latest
+    # A call that hangs would hold the group, and every status with it, for GitHub's six hours.
+    timeout-minutes: 10
     permissions:
       checks: read
       contents: read
@@ -164,6 +166,10 @@ jobs:
             if [ "$(jq -r .user.login <<<"$pr")" = "dependabot[bot]" ]; then
               printf '%s\n' success "Dependabot's: not reviewed by Claude" "$url"; return
             fi
+            # Claude Code's action doesn't run for bots, so CI never reviews another bot's pull request by itself.
+            if [ "$(jq -r .user.type <<<"$pr")" = Bot ]; then
+              printf '%s\n' success "A bot's: Claude reviews it when asked with /claude-review" "$url"; return
+            fi
             if [ "$(jq -r .head.repo.full_name <<<"$pr")" != "$REPO" ]; then
               printf '%s\n' success "From a fork: Claude reviews only branches here" "$url"; return
             fi
@@ -207,9 +213,9 @@ jobs:
             local -a result
             shift 3
             for number in "$@"; do
-              pr=$(gh api "repos/$REPO/pulls/$number")
-              # A pull request that has moved on from this commit is reported on its new head.
-              if [ "$(jq -r .head.sha <<<"$pr")" != "$sha" ] || [ "$(jq -r .state <<<"$pr")" != open ]; then continue; fi
+              # As listed at the start of the run, read once for both statuses; a pull request that moves on
+              # meanwhile is reported on its new head by the run its push starts.
+              pr=${listed[$number]}
               found=$((found + 1))
               evaluated=$("$evaluate" "$pr")
               mapfile -t result <<<"$evaluated"
@@ -223,8 +229,14 @@ jobs:
             report "$context" "$sha" "$state" "$description" "$url"
           }
 
-          # Every open pull request, by its head. Listed before the loop, so a failure to list them fails the run.
-          heads=$(gh api --paginate "repos/$REPO/pulls?state=open&per_page=100" --jq '.[] | "\(.head.sha) \(.number)"')
+          # Every open pull request, by its head, listed whole, so none is read again. Listed before the loop, so a
+          # failure to list them fails the run.
+          list=$(gh api --paginate "repos/$REPO/pulls?state=open&per_page=100" --jq '.[] | tojson')
+          declare -A listed
+          while IFS= read -r pr; do
+            if [ -n "$pr" ]; then listed[$(jq -r .number <<<"$pr")]=$pr; fi
+          done <<<"$list"
+          heads=$(for pr in "${listed[@]}"; do jq -r '"\(.head.sha) \(.number)"' <<<"$pr"; done)
           for sha in $(cut -d ' ' -f 1 <<<"$heads" | sort -u); do
             numbers=$(awk -v sha="$sha" '$1 == sha { print $2 }' <<<"$heads")
             # shellcheck disable=SC2086 # one argument a pull request

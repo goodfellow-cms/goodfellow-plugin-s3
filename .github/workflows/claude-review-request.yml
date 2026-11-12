@@ -19,10 +19,8 @@ env:
 
 jobs:
   request:
-    if: >-
-      github.event_name == 'issue_comment'
-      && github.event.issue.pull_request
-      && startsWith(github.event.comment.body, '/claude-review')
+    # startsWith ignores case, so the script below does too.
+    if: github.event.issue.pull_request && startsWith(github.event.comment.body, '/claude-review')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -42,19 +40,31 @@ jobs:
           if [ "$HAS_TOKEN" != "true" ]; then echo "::notice::No CLAUDE_CODE_OAUTH_TOKEN secret, so no review."; exit 0; fi
           # The comment's first line alone, so a comment that only mentions the command further down asks nothing.
           first=$(head -n 1 <<<"$COMMENT" | tr -d '\r')
+          # Whatever its case, as the job's condition reads it, so /Claude-Review High asks too.
+          shopt -s nocasematch
           if ! [[ "$first" =~ ^/claude-review([[:space:]]+(low|medium|high|xhigh))?[[:space:]]*$ ]]; then
             echo "::notice::Not a request for a review."; exit 0
           fi
-          level=${BASH_REMATCH[2]}
+          shopt -u nocasematch
+          level=${BASH_REMATCH[2],,}
           permission=$(gh api "repos/$GH_REPO/collaborators/$ACTOR/permission" --jq .permission) || permission=none
           case "$permission" in admin | maintain | write) ;; *)
             echo "::notice::$ACTOR can't push here, so they can't start a review."; exit 0 ;;
           esac
-          pr=$(gh pr view "$PR" --json headRefName,isCrossRepository,state)
+          if ! pr=$(gh pr view "$PR" --json headRefName,isCrossRepository,state); then
+            gh pr comment "$PR" --body "Couldn't read this pull request to start the review. Comment \`/claude-review\` again to try again."
+            exit 0
+          fi
           if jq -e '.isCrossRepository or .state != "OPEN"' <<<"$pr" > /dev/null; then
             echo "::notice::Only open pull requests from branches here are reviewed."; exit 0
           fi
           gh api --method POST "repos/$GH_REPO/issues/comments/$COMMENT_ID/reactions" -f content=eyes > /dev/null || true
-          if ! gh workflow run claude-review.yml --ref "$(jq -r .headRefName <<<"$pr")" -f pr="$PR" -f level="$level"; then
-            gh pr comment "$PR" --body "This branch's copy of \`claude-review.yml\` can't be asked by a comment yet. Merge the main branch into it and comment \`/claude-review\` again, or add the \`claude-review\` label."
+          if ! said=$(gh workflow run claude-review.yml --ref "$(jq -r .headRefName <<<"$pr")" -f pr="$PR" -f level="$level" 2>&1); then
+            echo "::warning::GitHub didn't start the review: $said"
+            # GitHub refuses a dispatch the branch's copy doesn't take (422) or where the branch has none (404).
+            if [[ $said == *"HTTP 422"* || $said == *"HTTP 404"* || $said == *"could not find any workflows"* ]]; then
+              gh pr comment "$PR" --body "This branch's copy of \`claude-review.yml\` can't be asked by a comment yet. Merge the main branch into it and comment \`/claude-review\` again, or add the \`claude-review\` label."
+            else
+              gh pr comment "$PR" --body "GitHub didn't start the review ([the run]($GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID) says why). Comment \`/claude-review\` again to try again."
+            fi
           fi

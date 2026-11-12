@@ -103,6 +103,11 @@ jobs:
           fi
           if [ -n "$ASKED" ] && ! is_level "$ASKED"; then skip "$ASKED isn't a level."; fi
           if ! [[ "$PR" =~ ^[0-9]+$ ]]; then skip "$PR isn't a pull request's number."; fi
+          # Claude Code's action refuses a run a bot started, such as CI for a push by Renovate; asking by comment
+          # still reviews it, as that run is started by this workflow's own bot, which the review step allows.
+          if [ "$EVENT" != "workflow_dispatch" ] && [[ "$ACTOR" == *"[bot]" ]]; then
+            skip "$ACTOR started this, and Claude Code's action doesn't run for bots. Comment /claude-review to ask."
+          fi
           # Anyone who can add a label can start a run, but only someone who can push starts a review. A dispatch
           # needs push access already.
           if [ "$EVENT_ACTION" = "labeled" ]; then
@@ -129,10 +134,19 @@ jobs:
             fi
           fi
           level=medium
+          levels=$(jq -r '.labels[].name | select(test("^claude-review:(low|medium|high|xhigh)$"))' <<<"$pr")
+          # With several level labels, such as one added by someone who can't push, which no review then tidied, the
+          # one added last counts, as the clean-up after a review keeps it; by event id, which only grows.
+          if [ "$(grep -c . <<<"$levels")" -gt 1 ]; then
+            newest=$(gh api --paginate "repos/$GH_REPO/issues/$PR/events?per_page=100" \
+              --jq '.[] | select(.event == "labeled" and .actor.login != "github-actions[bot]") | "\(.id) \(.label.name)"' |
+              sort -n | sed 's/^[0-9]* //' | grep -Fxf <(printf '%s\n' "$levels") | tail -n 1) || newest=""
+            levels=${newest:-$(head -n 1 <<<"$levels")}
+          fi
           # A level label on the pull request, then the one just added, then a level asked for, which wins.
           while IFS= read -r label; do
             case "$label" in claude-review:*) is_level "${label#claude-review:}" && level=${label#claude-review:} ;; esac
-          done < <(jq -r '.labels[].name' <<<"$pr"; printf '%s\n' "$ADDED")
+          done < <(printf '%s\n' "$levels" "$ADDED")
           if [ -n "$ASKED" ]; then level=$ASKED; fi
           {
             echo "run=true"
@@ -267,7 +281,7 @@ jobs:
                 | ([$m[] | .outputTokens // 0] | add) as $out
                 | "\($in) tokens read, \($out) written, by \($m | keys | join(", ")); about $\(.total_cost_usd // 0 | . * 100 | round / 100) at API prices; \(.num_turns // 0) turns in \((.duration_ms // 0) / 60000 | round) min."
               end
-            # The tools it was refused, by name only (never what it asked them), so a review that couldn't finish
+            # The tools it was refused, by name only (never what it asked them), so a review that could not finish
             # says why.
             + ([.permission_denials // [] | .[] | .tool_name // empty | tostring | gsub("[^A-Za-z0-9_:().*-]"; "")]
               | unique | if length > 0 then " Refused: \(join(", "))." else "" end)' <<<"$result" 2> /dev/null) || text="Claude Code reported no usage."
@@ -307,7 +321,6 @@ jobs:
           post() { gh api --method POST "repos/$GH_REPO/pulls/$PR/comments" -f commit_id="$SHA" "$@" 2>&1 > /dev/null; }
           # A finding as an item of a Markdown list, its later lines indented so they stay in the item.
           item() { printf -- '- `%s:%s`: %s\n' "$1" "$2" "$(sed '2,$s/^/  /' <<<"$3")"; }
-          posted=0
           : > "$RUNNER_TEMP/elsewhere.md"
           : > "$RUNNER_TEMP/unposted.md"
           while IFS= read -r finding; do
@@ -315,15 +328,15 @@ jobs:
             line=$(jq -r .line <<<"$finding")
             body=$(jq -r .body <<<"$finding")
             on_line() { post -f body="$body" -f path="$path" -F line="$line" -f side=RIGHT; }
-            if err=$(on_line); then posted=$((posted + 1)); continue; fi
+            if err=$(on_line); then continue; fi
             # Anything but GitHub saying the line isn't in the change, such as its secondary rate limit, gets one more go.
             if [[ $err != *"HTTP 422"* ]]; then
               sleep 10
-              if err=$(on_line); then posted=$((posted + 1)); continue; fi
+              if err=$(on_line); then continue; fi
             fi
             if [[ $err == *"HTTP 422"* ]]; then
               if err=$(post -f body="$(printf 'Line %s: %s' "$line" "$body")" -f path="$path" -f subject_type=file); then
-                posted=$((posted + 1)); continue
+                continue
               fi
             fi
             if [[ $err == *"HTTP 422"* ]]; then
@@ -333,7 +346,6 @@ jobs:
               item "$path" "$line" "$body" >> "$RUNNER_TEMP/unposted.md"
             fi
           done < <(jq -c '.findings[] | select(type == "object" and (.path | type) == "string" and (.line | type) == "number" and (.body | type) == "string")' <<<"$FINDINGS")
-          echo "posted=$posted" >> "$GITHUB_OUTPUT"
           echo "done=true" >> "$GITHUB_OUTPUT"
 
       - name: Remember the review
@@ -381,7 +393,7 @@ jobs:
           if [ "$ADDED" = "claude-review" ]; then remove claude-review; fi
           levels=$(gh pr view "$PR" --json labels --jq '.labels[].name | select(test("^claude-review:(low|medium|high|xhigh)$"))')
           # The last added of those on the pull request now, so one taken off by hand since never counts.
-          newest=$(sed 's/^[0-9]* //' <<<"$history" | grep -Fxf <(printf '%s\n' "$levels") | tail -n 1 || true)
+          newest=$(sort -n <<<"$history" | sed 's/^[0-9]* //' | grep -Fxf <(printf '%s\n' "$levels") | tail -n 1 || true)
           while IFS= read -r label; do
             if [ -n "$label" ] && [ -n "$newest" ] && [ "$label" != "$newest" ]; then remove "$label"; fi
           done <<<"$levels"
@@ -424,7 +436,7 @@ jobs:
             if [ -n "$unposted" ]; then
               body=$(printf '%s\n\nGitHub didn'"'"'t take these as comments on the change ([the run](%s) says why), so they are here instead:\n\n%s' "$body" "$RUN_URL" "$unposted")
             fi
-            body=$(printf '%s\n\nAnything else it found is in comments on the lines. Where one here doesn'"'"'t apply, the `no-claude-review` label passes the "Claude reviewed" status (and skips the reviews CI starts).' "$body")
+            body=$(printf '%s\n\nAnything else it found is in comments on the lines. Once these are dealt with, comment `/claude-review` for another review, or, where one doesn'"'"'t apply, add the `no-claude-review` label, which passes the "Claude reviewed" status (and skips the reviews CI starts).' "$body")
           elif [ "$RESULT" = success ] && [ "$OUTCOME" = success ] && [ "$POSTED" = true ]; then
             outcome=reviewed
             body="Claude reviewed $short at **$LEVEL**. What it found is in comments on the lines; none means it found nothing to raise."
