@@ -49,7 +49,7 @@ jobs:
   # Claude's review, once everything else has passed, so it never reads code that's about to change to fix CI. It
   # reviews a pull request once by itself; see claude-review.yml for asking again, and the labels that change it.
   # What it finds is the "Claude reviewed" status (review-status.yml), never this run's result. Each of its jobs
-  # takes only the permissions it needs from these: Claude's own, only reading and commenting.
+  # takes only the permissions it needs from these: Claude's own, only reading.
   claude-review:
     needs: [audit, check]
     if: github.event_name == 'pull_request'
