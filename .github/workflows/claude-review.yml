@@ -10,9 +10,10 @@
 #   medium otherwise, and no-claude-review skips the review CI would start.
 #
 # Every review runs the pull request's own copy of this workflow, which gets this repository's secrets only for a
-# branch here, whose author can already push here: a label's run is the pull request's own, and a comment's run (the
-# main branch's) only checks the request and starts the pull request's own copy with workflow_dispatch, never
-# reading its code. Only pull requests from branches here are reviewed, and only someone who can push here starts a
+# branch here, whose author can already push here: a label's run is the pull request's own, and a comment's run
+# (claude-review-request.yml, the main branch's) only checks the request and starts the pull request's own copy with
+# workflow_dispatch, never reading its code. This file has no comment trigger, so nothing here runs with the main
+# branch's rights over the pull request's code. Only pull requests from branches here are reviewed, and only someone who can push here starts a
 # review, since each one uses the subscription.
 #
 # Each review keeps one comment up to date: that Claude is reviewing a commit, then what it found or why it
@@ -34,9 +35,8 @@ on:
         required: false
   pull_request:
     types: [labeled]
-  issue_comment:
-    types: [created]
-  # How a comment's run starts the pull request's own copy, and how someone who can push can ask from the Actions tab.
+  # How a comment's request (claude-review-request.yml) starts the pull request's own copy, and how someone who can
+  # push can ask from the Actions tab.
   workflow_dispatch:
     inputs:
       pr:
@@ -52,57 +52,14 @@ permissions: {}
 
 env:
   GH_REPO: ${{ github.repository }}
-  PR: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
+  PR: ${{ github.event.pull_request.number || inputs.pr }}
   LEVELS: low medium high xhigh
 
 jobs:
-  # A comment asking for a review, checked here and passed to the pull request's own copy of this workflow.
-  request:
-    if: >-
-      github.event_name == 'issue_comment'
-      && github.event.issue.pull_request
-      && startsWith(github.event.comment.body, '/claude-review')
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      actions: write
-      issues: write
-      pull-requests: read
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - name: Start the pull request's own review
-        env:
-          HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
-          ACTOR: ${{ github.event.sender.login }}
-          COMMENT: ${{ github.event.comment.body }}
-          COMMENT_ID: ${{ github.event.comment.id }}
-        run: |
-          if [ "$HAS_TOKEN" != "true" ]; then echo "::notice::No CLAUDE_CODE_OAUTH_TOKEN secret, so no review."; exit 0; fi
-          # The comment's first line alone, so a comment that only mentions the command further down asks nothing.
-          first=$(head -n 1 <<<"$COMMENT" | tr -d '\r')
-          if ! [[ "$first" =~ ^/claude-review([[:space:]]+(low|medium|high|xhigh))?[[:space:]]*$ ]]; then
-            echo "::notice::Not a request for a review."; exit 0
-          fi
-          level=${BASH_REMATCH[2]}
-          permission=$(gh api "repos/$GH_REPO/collaborators/$ACTOR/permission" --jq .permission) || permission=none
-          case "$permission" in admin | maintain | write) ;; *)
-            echo "::notice::$ACTOR can't push here, so they can't start a review."; exit 0 ;;
-          esac
-          pr=$(gh pr view "$PR" --json headRefName,isCrossRepository,state)
-          if jq -e '.isCrossRepository or .state != "OPEN"' <<<"$pr" > /dev/null; then
-            echo "::notice::Only open pull requests from branches here are reviewed."; exit 0
-          fi
-          gh api --method POST "repos/$GH_REPO/issues/comments/$COMMENT_ID/reactions" -f content=eyes > /dev/null || true
-          if ! gh workflow run claude-review.yml --ref "$(jq -r .headRefName <<<"$pr")" -f pr="$PR" -f level="$level"; then
-            gh pr comment "$PR" --body "This branch's copy of \`claude-review.yml\` can't be asked by a comment yet. Merge the main branch into it and comment \`/claude-review\` again, or add the \`claude-review\` label."
-          fi
-
   choose:
     if: >-
       github.event_name == 'workflow_dispatch'
-      || (github.event_name != 'issue_comment'
-        && github.event.pull_request.head.repo.full_name == github.repository
+      || (github.event.pull_request.head.repo.full_name == github.repository
         && ((github.event.action == 'labeled'
             && (github.event.label.name == 'claude-review' || startsWith(github.event.label.name, 'claude-review:')))
           || (github.event.action != 'labeled'
@@ -211,7 +168,7 @@ jobs:
       contents: read
       pull-requests: write
     concurrency:
-      group: claude-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
+      group: claude-review-${{ github.event.pull_request.number || inputs.pr }}
     outputs:
       outcome: ${{ steps.claude.outcome }}
       usage: ${{ steps.usage.outputs.text }}
