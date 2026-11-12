@@ -9,6 +9,7 @@ import admin, {
   chosenSettings,
   movesStoredFiles,
   reachable,
+  shownBucketSecret,
   signed,
 } from "../src/admin.js";
 import plugin, { SERVICES, s3 } from "../src/index.js";
@@ -24,7 +25,7 @@ const settings = {
   location: "0123456789abcdef0123456789abcdef",
   ownAddress: true,
   publicRead: false,
-  endpoint: "https://account.r2.cloudflarestorage.com",
+  endpoint: "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com",
   bucket: "parish-media",
   region: "auto",
   folder: "",
@@ -200,7 +201,7 @@ describe("media storage in the admin panel", () => {
       {
         method: "DELETE",
         address: "/media/a.jpg",
-        url: "https://account.r2.cloudflarestorage.com/parish-media/b.jpg",
+        url: "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com/parish-media/b.jpg",
         headers: {},
       },
     ];
@@ -270,11 +271,11 @@ describe("media storage in the admin panel", () => {
 
   it("reaches only the services its permissions name", () => {
     const connect = plugin.permissions?.connect ?? [];
-    expect(reachable("https://account.r2.cloudflarestorage.com", connect)).toBe(true);
+    expect(reachable("https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com", connect)).toBe(true);
     expect(reachable("https://s3.eu-west-1.amazonaws.com", connect)).toBe(true);
     expect(reachable("https://storage.googleapis.com", connect)).toBe(true);
     expect(reachable("https://amazonaws.com.evil.example", connect)).toBe(false);
-    expect(reachable("http://account.r2.cloudflarestorage.com", connect)).toBe(false);
+    expect(reachable("http://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com", connect)).toBe(false);
   });
 });
 
@@ -361,6 +362,33 @@ describe("choosing where files are kept", () => {
   it("says what the bucket's secret is, and asks the bucket to allow only the frame's requests", () => {
     expect(bucketSecretValue({ bucket: "parish-media", folder: "" })).toBe("parish-media");
     expect(bucketSecretValue({ bucket: "parish-media", folder: "site/" })).toBe("parish-media/site/");
+    // The signer works out a known service's address itself, and takes a site's own service's from the secret.
+    expect(
+      bucketSecretValue({ service: "aws", endpoint: "https://s3.eu-west-1.amazonaws.com", bucket: "b1", folder: "" }),
+    ).toBe("b1");
+    expect(
+      bucketSecretValue({ service: "custom:minio", endpoint: "https://minio.example.org", bucket: "b1", folder: "s/" }),
+    ).toBe("https://minio.example.org/b1/s/");
+    // Never an address the signer would refuse, which would leave the bucket unpinned.
+    expect(
+      bucketSecretValue({ service: "custom:minio", endpoint: "https://MinIO.example.org/", bucket: "b1", folder: "" }),
+    ).toBe("https://minio.example.org/b1");
+    expect(
+      bucketSecretValue({ service: "custom:minio", endpoint: "http://minio.example.org", bucket: "b1", folder: "" }),
+    ).toBeUndefined();
+    expect(bucketSecretValue({ service: "custom:minio", bucket: "b1", folder: "" })).toBeUndefined();
+    // On the screen: nothing until a service is chosen, as where saved settings name one the config no longer adds.
+    const aws = SERVICES.find((service) => service.id === "aws");
+    expect(shownBucketSecret(undefined, "", "b1", "s")).toEqual({ missing: "service" });
+    expect(shownBucketSecret(aws, "eu-west-1", "b1", "s")).toEqual({ value: "b1/s/" });
+    expect(shownBucketSecret(aws, "eu-west-1", " ", "")).toBeUndefined();
+    const minio = servicesFrom({
+      services: [{ id: "minio", name: "MinIO", endpoint: "https://minio.example.org" }],
+    }).at(-1);
+    expect(shownBucketSecret(minio, "", "b1", "")).toEqual({ value: "https://minio.example.org/b1" });
+    expect(shownBucketSecret(minio && { ...minio, endpoint: () => "http://minio.example.org" }, "", "b1", "")).toEqual({
+      missing: "address",
+    });
     expect(JSON.parse(CORS_RULES)).toEqual([
       {
         AllowedOrigins: ["*"],
@@ -392,6 +420,12 @@ describe("choosing where files are kept", () => {
     expect(configured.permissions?.connect).toContain("https://minio.example.org");
     expect(configured.options).toEqual(options);
     expect(servicesFrom({ services: [{ id: "broken" }] })).toHaveLength(SERVICES.length);
+    // Never a service at an address the signer would refuse.
+    const plain = { id: "plain", name: "Plain", endpoint: "http://minio.example.org" };
+    expect(servicesFrom({ services: [plain] })).toHaveLength(SERVICES.length);
+    expect(servicesFrom({ services: [{ ...plain, endpoint: "http://localhost:9000" }] })).toHaveLength(
+      SERVICES.length + 1,
+    );
   });
 });
 

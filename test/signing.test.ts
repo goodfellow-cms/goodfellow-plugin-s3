@@ -7,6 +7,7 @@ import {
   MAX_SIGNED,
   pinnedFrom,
   type SignedRequest,
+  serviceAddress,
   signInput,
   signRequests,
 } from "../src/signing.js";
@@ -16,9 +17,9 @@ const settings = {
   location: "0123456789abcdef0123456789abcdef",
   ownAddress: true,
   publicRead: false,
-  endpoint: "https://s3.eu-west-1.amazonaws.com",
+  endpoint: "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com",
   bucket: "parish-media",
-  region: "eu-west-1",
+  region: "auto",
   folder: "site/",
   publicUrl: "https://media.example.org",
 };
@@ -147,6 +148,61 @@ describe("signing", () => {
       true,
     );
     expect(isPinnedPlace({ ...settings, folder: "" }, { bucket: "parish-media", folder: "site/" })).toBe(false);
+  });
+
+  it("sends requests to the address the service gives, never the settings file's own", async () => {
+    const check = { action: "check" };
+    // Another bucket's own address, which services read as that bucket, with the pinned bucket's name as the
+    // start of the file's path, so the pin would only ever have covered the name.
+    for (const endpoint of [
+      "https://other-bucket.s3.eu-west-1.amazonaws.com",
+      "https://parish-media.s3.eu-west-1.amazonaws.com",
+      "https://elsewhere.example.org",
+    ]) {
+      await expect(signRequests(check, { ...settings, endpoint }, keys), endpoint).rejects.toThrow(
+        /but the bucket is at https:\/\/0123456789abcdef0123456789abcdef\.r2\.cloudflarestorage\.com/,
+      );
+    }
+    const aws = {
+      ...settings,
+      service: "aws",
+      location: "eu-west-1",
+      endpoint: "https://s3.eu-west-1.amazonaws.com",
+      region: "eu-west-1",
+    };
+    const [put] = await signRequests(check, aws, keys);
+    expect(new URL(put?.url ?? "").origin).toBe("https://s3.eu-west-1.amazonaws.com");
+    expect(new URL(put?.url ?? "").pathname).toBe("/parish-media/site/.goodfellow-check");
+    // The region signed for is the service's too, whatever the file says.
+    expect(serviceAddress({ ...aws, region: "us-east-1" }, keys.place)).toEqual({
+      endpoint: "https://s3.eu-west-1.amazonaws.com",
+      region: "eu-west-1",
+    });
+    // A region the service wouldn't have can't make an address of its own.
+    expect(serviceAddress({ ...aws, location: "eu-west-1.evil.example#" }, keys.place)).toBeUndefined();
+    // A secret naming another address is for another service, never this one's.
+    const elsewhere = { bucket: "parish-media", folder: "site/", endpoint: "https://minio.example.org" };
+    expect(serviceAddress(aws, elsewhere)).toBeUndefined();
+    expect(serviceAddress(aws, { ...elsewhere, endpoint: "https://s3.eu-west-1.amazonaws.com" })).toEqual({
+      endpoint: "https://s3.eu-west-1.amazonaws.com",
+      region: "eu-west-1",
+    });
+  });
+
+  it("takes a service the plugin doesn't know only at the address the bucket's secret gives", async () => {
+    const check = { action: "check" };
+    const minio = { ...settings, service: "custom:minio", location: "", endpoint: "https://minio.example.org" };
+    await expect(signRequests(check, minio, keys)).rejects.toThrow(/put the service's address before the bucket/);
+    const place = pinnedFrom({ S3_BUCKET: "https://MinIO.example.org/parish-media/site/" });
+    expect(place).toEqual({ bucket: "parish-media", folder: "site/", endpoint: "https://minio.example.org" });
+    const [put] = await signRequests(check, minio, { ...keys, place });
+    expect(put?.url).toMatch(/^https:\/\/minio\.example\.org\/parish-media\/site\/\.goodfellow-check\?/);
+    await expect(
+      signRequests(check, { ...minio, endpoint: "https://other.example.org" }, { ...keys, place }),
+    ).rejects.toThrow(/but the bucket is at https:\/\/minio\.example\.org/);
+    for (const value of ["ftp://minio.example.org/parish-media", "https://minio.example.org/", "http://10.0.0.1/b"]) {
+      expect(pinnedFrom({ S3_BUCKET: value }), value).toBeUndefined();
+    }
   });
 
   it("reads the bucket's secret as a bucket's name and a folder", () => {

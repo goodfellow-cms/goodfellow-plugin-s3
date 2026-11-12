@@ -7,8 +7,9 @@
  * and the frame sends files to the bucket at the signed addresses.
  */
 import { isSignedFor, isSignedRequests, StorageError, sendSigned } from "./client.js";
-import { isAnswer, type StorageService, servicesFrom } from "./services.js";
+import { isAnswer, SERVICES, type StorageService, servicesFrom } from "./services.js";
 import {
+  isServiceAddress,
   MEDIA_STORAGE_FILE,
   objectKey,
   parseSettings,
@@ -259,9 +260,46 @@ function sameHost(a: string, b: string): boolean {
   }
 }
 
-/** The value of the `S3_BUCKET` secret for settings: the bucket, and its folder after a slash. */
-export function bucketSecretValue(settings: Pick<StorageSettings, "bucket" | "folder">): string {
-  return `${settings.bucket}${settings.folder ? `/${settings.folder}` : ""}`;
+/**
+ * The value of the `S3_BUCKET` secret for settings: the bucket, and its folder
+ * after a slash, with the service's address first for a service the plugin
+ * doesn't know, which the signer can't work out from the settings. Nothing
+ * where that address isn't one the signer takes, since a secret without it
+ * would sign nothing.
+ */
+export function bucketSecretValue(
+  settings: Pick<StorageSettings, "bucket" | "folder"> & { service?: string; endpoint?: string },
+): string | undefined {
+  const place = `${settings.bucket}${settings.folder ? `/${settings.folder}` : ""}`;
+  const known = SERVICES.some((service) => service.id === settings.service);
+  if (known || (!settings.service && !settings.endpoint)) return place;
+  // As the signer reads it back: an address of its own, with nothing after the host.
+  const endpoint = (settings.endpoint ?? "").trim().replace(/\/+$/, "").toLowerCase();
+  return isServiceAddress(endpoint) ? `${endpoint}/${place}` : undefined;
+}
+
+/**
+ * What the keys section says about `S3_BUCKET` for what's on the screen: its
+ * value, or why there's none yet: no service chosen, as where saved settings
+ * name one the site's config no longer adds, or a service at an address the
+ * signer can't take. Nothing before a bucket is typed.
+ */
+export function shownBucketSecret(
+  service: StorageService | undefined,
+  location: string,
+  bucket: string,
+  folder: string,
+): { value: string } | { missing: "service" | "address" } | undefined {
+  if (!bucket.trim()) return undefined;
+  if (!service) return { missing: "service" };
+  const typed = folder.trim().replace(/^\/+/, "");
+  const value = bucketSecretValue({
+    service: service.id,
+    endpoint: service.endpoint(location.trim()),
+    bucket: bucket.trim(),
+    folder: typed && !typed.endsWith("/") ? `${typed}/` : typed,
+  });
+  return value === undefined ? { missing: "address" } : { value };
 }
 
 /**
@@ -560,18 +598,22 @@ async function settingsScreen(element: { ownerDocument: unknown }, api: PluginAd
     keysBody.replaceChildren();
     keysBody.append(
       h("p", {
-        text: `The bucket's keys never go into the admin panel: the site keeps them as ${KEY_ID_SECRET} and ${SECRET_KEY_SECRET}, and signs each upload with them. It also keeps ${BUCKET_SECRET}, the bucket and folder the keys are for, and signs nothing anywhere else, even if these settings change.`,
+        text: `The bucket's keys never go into the admin panel: the site keeps them as ${KEY_ID_SECRET} and ${SECRET_KEY_SECRET}, and signs each upload with them. It also keeps ${BUCKET_SECRET}, the bucket and folder the keys are for (with the service's address first, for a service of the site's own), and signs nothing anywhere else, even if these settings change.`,
       }),
     );
-    if (bucket.value.trim()) {
-      const typed = folder.value.trim().replace(/^\/+/, "");
-      const value = bucketSecretValue({
-        bucket: bucket.value.trim(),
-        folder: typed && !typed.endsWith("/") ? `${typed}/` : typed,
-      });
+    const shown = shownBucketSecret(service, location.value, bucket.value, folder.value);
+    if (shown && "value" in shown) {
       keysBody.append(
         h("p", { text: `For these settings, ${BUCKET_SECRET} is:` }),
-        h("pre", {}, h("code", { text: value })),
+        h("pre", {}, h("code", { text: shown.value })),
+      );
+    } else if (shown?.missing === "service") {
+      keysBody.append(h("p", { text: `Choose the service above to see what ${BUCKET_SECRET} is.` }));
+    } else if (shown?.missing === "address") {
+      keysBody.append(
+        h("p", {
+          text: `This service's address isn't one the site can sign at: it needs to start https://. A developer can change it where the site's config adds the service.`,
+        }),
       );
     }
     if (service) {
