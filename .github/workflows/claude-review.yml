@@ -288,7 +288,8 @@ jobs:
     # the review went.
     steps:
       # What Claude found goes on the lines it's about in the reviewed commit, or on the file where the line isn't
-      # part of the change; anything that fits neither is listed in the review's comment instead.
+      # part of the change; anything GitHub refuses on both (422) is about a line outside the change, and anything it
+      # didn't take for another reason, even after waiting once, is listed apart in the review's comment.
       - name: Post what it found
         id: post
         if: always() && needs.review.outputs.outcome == 'success'
@@ -302,19 +303,34 @@ jobs:
             echo "::warning::The review gave no findings to post."
             exit 0
           fi
+          # Posts a comment on the change, printing what GitHub said only when it refused.
+          post() { gh api --method POST "repos/$GH_REPO/pulls/$PR/comments" -f commit_id="$SHA" "$@" 2>&1 > /dev/null; }
+          # A finding as an item of a Markdown list, its later lines indented so they stay in the item.
+          item() { printf -- '- `%s:%s`: %s\n' "$1" "$2" "$(sed '2,$s/^/  /' <<<"$3")"; }
           posted=0
           : > "$RUNNER_TEMP/elsewhere.md"
+          : > "$RUNNER_TEMP/unposted.md"
           while IFS= read -r finding; do
             path=$(jq -r .path <<<"$finding")
             line=$(jq -r .line <<<"$finding")
             body=$(jq -r .body <<<"$finding")
-            if gh api --method POST "repos/$GH_REPO/pulls/$PR/comments" -f body="$body" -f commit_id="$SHA" \
-                -f path="$path" -F line="$line" -f side=RIGHT > /dev/null 2>&1 ||
-              gh api --method POST "repos/$GH_REPO/pulls/$PR/comments" -f body="$(printf 'Line %s: %s' "$line" "$body")" \
-                -f commit_id="$SHA" -f path="$path" -f subject_type=file > /dev/null 2>&1; then
-              posted=$((posted + 1))
+            on_line() { post -f body="$body" -f path="$path" -F line="$line" -f side=RIGHT; }
+            if err=$(on_line); then posted=$((posted + 1)); continue; fi
+            # Anything but GitHub saying the line isn't in the change, such as its secondary rate limit, gets one more go.
+            if [[ $err != *"HTTP 422"* ]]; then
+              sleep 10
+              if err=$(on_line); then posted=$((posted + 1)); continue; fi
+            fi
+            if [[ $err == *"HTTP 422"* ]]; then
+              if err=$(post -f body="$(printf 'Line %s: %s' "$line" "$body")" -f path="$path" -f subject_type=file); then
+                posted=$((posted + 1)); continue
+              fi
+            fi
+            if [[ $err == *"HTTP 422"* ]]; then
+              item "$path" "$line" "$body" >> "$RUNNER_TEMP/elsewhere.md"
             else
-              printf -- '- `%s:%s`: %s\n' "$path" "$line" "$body" >> "$RUNNER_TEMP/elsewhere.md"
+              echo "::warning::GitHub didn't take a finding on $path:$line: $err"
+              item "$path" "$line" "$body" >> "$RUNNER_TEMP/unposted.md"
             fi
           done < <(jq -c '.findings[] | select(type == "object" and (.path | type) == "string" and (.line | type) == "number" and (.body | type) == "string")' <<<"$FINDINGS")
           echo "posted=$posted" >> "$GITHUB_OUTPUT"
@@ -393,12 +409,22 @@ jobs:
           COMMENT: ${{ needs.choose.outputs.comment }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          # Lengths in characters, as GitHub counts them, not bytes.
+          export LC_ALL=C.UTF-8
           short=${SHA:0:7}
           elsewhere=$(cat "$RUNNER_TEMP/elsewhere.md" 2> /dev/null || true)
-          if [ "$RESULT" = success ] && [ "$OUTCOME" = success ] && [ "$POSTED" = true ] && [ -n "$elsewhere" ]; then
-            # Findings no comment on the change could hold, which the status counts against the pull request.
+          unposted=$(cat "$RUNNER_TEMP/unposted.md" 2> /dev/null || true)
+          if [ "$RESULT" = success ] && [ "$OUTCOME" = success ] && [ "$POSTED" = true ] && [ -n "$elsewhere$unposted" ]; then
+            # Findings no comment on the change holds, which the status counts against the pull request.
             outcome=noted
-            body=$(printf 'Claude reviewed %s at **%s**. These findings are about lines outside the change, so they are here rather than on the lines:\n\n%s\n\nAnything else it found is in comments on the lines.' "$short" "$LEVEL" "$elsewhere")
+            body="Claude reviewed $short at **$LEVEL**."
+            if [ -n "$elsewhere" ]; then
+              body=$(printf '%s These findings are about lines outside the change, so they are here rather than on the lines:\n\n%s' "$body" "$elsewhere")
+            fi
+            if [ -n "$unposted" ]; then
+              body=$(printf '%s\n\nGitHub didn'"'"'t take these as comments on the change ([the run](%s) says why), so they are here instead:\n\n%s' "$body" "$RUN_URL" "$unposted")
+            fi
+            body=$(printf '%s\n\nAnything else it found is in comments on the lines. Where one here doesn'"'"'t apply, the `no-claude-review` label passes the "Claude reviewed" status (and skips the reviews CI starts).' "$body")
           elif [ "$RESULT" = success ] && [ "$OUTCOME" = success ] && [ "$POSTED" = true ]; then
             outcome=reviewed
             body="Claude reviewed $short at **$LEVEL**. What it found is in comments on the lines; none means it found nothing to raise."
@@ -414,6 +440,11 @@ jobs:
           fi
           body=$(printf '<!-- claude-review sha=%s outcome=%s -->\n%s\n\nUsage: %s\n' "$SHA" "$outcome" "$body" "${USAGE:-Claude Code reported no usage.}")
           printf '%s\n' "$body" >> "$GITHUB_STEP_SUMMARY"
+          # GitHub refuses a comment longer than 65,536 characters, which would leave this one saying "reviewing", so a
+          # longer one is cut short, keeping its first line, and the run's summary above keeps all of it.
+          if [ "${#body}" -gt 60000 ]; then
+            body=$(printf '%s\n\n… cut short, since GitHub limits how long a comment can be; [the run](%s)'"'"'s summary has all of it.' "${body:0:60000}" "$RUN_URL")
+          fi
           gh api --method PATCH "repos/$GH_REPO/issues/comments/$COMMENT" -f body="$body" > /dev/null
 
       # The status follows the comment just written; a run started by this job's token is the one kind GitHub allows.
