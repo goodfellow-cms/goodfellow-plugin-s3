@@ -156,7 +156,9 @@ jobs:
 
   review:
     needs: choose
-    if: needs.choose.outputs.run == 'true'
+    # Only a review with its own comment runs, since the comment is where its outcome goes: without one, the request
+    # stays as it was, for another try.
+    if: needs.choose.outputs.run == 'true' && needs.choose.outputs.comment != ''
     runs-on: ubuntu-latest
     timeout-minutes: 45
     # Only what reading needs: Claude runs with this job's token, and the finish job posts what it found.
@@ -255,7 +257,7 @@ jobs:
 
   finish:
     needs: [choose, review]
-    if: always() && needs.choose.outputs.run == 'true'
+    if: always() && needs.choose.outputs.run == 'true' && needs.choose.outputs.comment != ''
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -340,7 +342,7 @@ jobs:
             fi
           }
           if [ "$ADDED" = "claude-review" ]; then remove claude-review; fi
-          levels=$(gh pr view "$PR" --json labels --jq '.labels[].name | select(startswith("claude-review:"))')
+          levels=$(gh pr view "$PR" --json labels --jq '.labels[].name | select(test("^claude-review:(low|medium|high|xhigh)$"))')
           # The last added of those on the pull request now, so one taken off by hand since never counts.
           newest=$(sed 's/^[0-9]* //' <<<"$history" | grep -Fxf <(printf '%s\n' "$levels") | tail -n 1 || true)
           while IFS= read -r label; do
