@@ -192,6 +192,8 @@ jobs:
               reviewed)
                 threads_result Claude "$number" github-actions \
                   "Claude reviewed $of, and its comments are resolved" "$link" ;;
+              noted)
+                printf '%s\n' failure "Claude raised findings outside the change in $of: see its comment" "$link" ;;
               *)
                 printf '%s\n' failure "Claude couldn't review $of. Comment /claude-review to try again" "$link" ;;
             esac
