@@ -9,6 +9,11 @@ on:
 
 permissions: {}
 
+# Every step's pipes fail when any command in them does, not only the last, as in the publish workflow.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   # Known security advisories in every package it installs, from the lockfile, in a job of its own so a new
   # advisory doesn't hide the other checks' results.
