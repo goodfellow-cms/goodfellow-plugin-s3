@@ -45,6 +45,8 @@ jobs:
       - run: npm run build
       # The manifest the build writes must be the one committed, which the Plugins screen reads from npm.
       - run: git diff --exit-code goodfellow-plugin.json
+      # Packs the release as the publish workflow does, so a release that can't be packed shows here, not after its tag.
+      - run: bash scripts/pack.sh "$RUNNER_TEMP/package"
 
   # Claude's review, once everything else has passed, so it never reads code that's about to change to fix CI. It
   # reviews a pull request once by itself; see claude-review.yml for asking again, and the labels that change it.
