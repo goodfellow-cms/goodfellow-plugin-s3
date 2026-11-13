@@ -184,7 +184,7 @@ jobs:
     # stays as it was, for another try.
     if: needs.choose.outputs.run == 'true' && needs.choose.outputs.comment != ''
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     # Only what reading needs: Claude runs with this job's token, and the finish job posts what it found.
     permissions:
       contents: read
@@ -200,24 +200,31 @@ jobs:
     steps:
       # Reviews of one pull request wait their turn here, one at a time: GitHub drops a waiting review when a newer
       # one joins the queue, and its finish says so (outcome=replaced). CI's review checks again, once its turn
-      # comes, that no review that ran meanwhile has made it unneeded: one whose finish has labelled the pull request, or one that
-      # started before this one and still says it's reviewing, since its finish labels it only once this slot is free.
-      # Each review's comment is posted as it's chosen, so an earlier comment is an earlier review.
+      # comes, that no review that ran meanwhile has made it unneeded: one whose finish has labelled the pull request,
+      # or one that started before this one and succeeded. An earlier one still saying it's reviewing has ended its
+      # review, since this slot is free, but not its finish, which says how it went: this waits for that, and runs
+      # where it failed, was dropped, or still hasn't said after `WAIT` seconds. Each review's comment is posted as
+      # it's chosen, so an earlier comment is an earlier review.
       - name: Check it's still wanted
         id: still
         if: github.event_name == 'pull_request' && github.event.action != 'labeled'
         continue-on-error: true
-        timeout-minutes: 2
+        timeout-minutes: 12
         env:
           GH_TOKEN: ${{ github.token }}
           OWN: ${{ needs.choose.outputs.comment }}
+          WAIT: 600
         run: |
           unneeded() { echo "::notice::$1"; echo "skipped=true" >> "$GITHUB_OUTPUT"; exit 0; }
           # A lookup that fails fails the step, which stops the review: it may have been labelled not to run.
-          labelled=$(gh pr view "$PR" --json labels --jq '[.labels[].name] | any(. == "claude-reviewed" or . == "no-claude-review")')
-          if [ "$labelled" = true ]; then
-            unneeded "Reviewed meanwhile, or no longer to be reviewed by itself."
-          fi
+          check_labels() {
+            local labelled
+            labelled=$(gh pr view "$PR" --json labels --jq '[.labels[].name] | any(. == "claude-reviewed" or . == "no-claude-review")')
+            if [ "$labelled" = true ]; then
+              unneeded "Reviewed meanwhile, or no longer to be reviewed by itself."
+            fi
+          }
+          check_labels
           if [[ "$OWN" =~ ^[0-9]+$ ]]; then
             # Only the last two hours': the status counts a review still "reviewing" after that as not finished.
             since=$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ)
@@ -225,7 +232,22 @@ jobs:
               | select(.user.login == "github-actions[bot]" and .id < (env.OWN | tonumber)
                 and (.body | startswith("<!-- claude-review ") and (split("\n")[0] | contains(" outcome=reviewing "))))
               | .id')
-            if [ -n "$earlier" ]; then unneeded "A review that started earlier is finishing."; fi
+            # Each earlier review's outcome, once its finish has said it: reviewing until then.
+            deadline=$((SECONDS + WAIT))
+            for id in $earlier; do
+              while :; do
+                # A comment that's gone, or can't be read, has no outcome to wait for.
+                outcome=$(gh api "repos/$GH_REPO/issues/comments/$id" --jq '.body | split("\n")[0]
+                  | ((capture("outcome=(?<o>[a-z]+)") | .o)? // "gone")' || echo gone)
+                if [ "$outcome" = reviewed ] || [ "$outcome" = noted ]; then
+                  unneeded "A review that started earlier has finished."
+                fi
+                if [ "$outcome" != reviewing ] || [ "$SECONDS" -ge "$deadline" ]; then break; fi
+                sleep 15
+              done
+            done
+            # Labels added while it waited count too, such as no-claude-review, or claude-reviewed from a finish.
+            check_labels
           fi
 
       # A review that fails says so in its comment and the "Claude reviewed" status, never by failing CI.
