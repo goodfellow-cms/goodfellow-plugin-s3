@@ -63,6 +63,8 @@ jobs:
       - id: pack
         run: |
           name=$(node -p 'require("./package.json").name')
+          # npm pack writes into a folder that's there already, and fails otherwise.
+          mkdir -p "$RUNNER_TEMP/package"
           tarball=$(npm pack --json --pack-destination "$RUNNER_TEMP/package" | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8"))[0].filename')
           digest="sha512-$(openssl dgst -sha512 -binary "$RUNNER_TEMP/package/$tarball" | base64 -w0)"
           {

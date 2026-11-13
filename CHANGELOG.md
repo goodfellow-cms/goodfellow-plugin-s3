@@ -1,5 +1,11 @@
 # goodfellow-plugin-s3
 
+## 0.2.2
+
+### Patch Changes
+
+- Releases reach npm again: the publish workflow makes the folder it packs the release into, which `npm pack` doesn't, so 0.2.1 never got past packing. This release carries 0.2.1's changes.
+
 ## 0.2.1
 
 ### Patch Changes
