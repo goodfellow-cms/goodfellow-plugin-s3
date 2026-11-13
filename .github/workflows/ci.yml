@@ -9,6 +9,11 @@ on:
 
 permissions: {}
 
+# Every step's pipes fail when any command in them does, not only the last, as in the publish workflow.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   # Known security advisories in every package it installs, from the lockfile, in a job of its own so a new
   # advisory doesn't hide the other checks' results.
@@ -45,6 +50,8 @@ jobs:
       - run: npm run build
       # The manifest the build writes must be the one committed, which the Plugins screen reads from npm.
       - run: git diff --exit-code goodfellow-plugin.json
+      # Packs the release as the publish workflow does, so a release that can't be packed shows here, not after its tag.
+      - run: bash scripts/pack.sh "$RUNNER_TEMP/package"
 
   # Claude's review, once everything else has passed, so it never reads code that's about to change to fix CI. It
   # reviews a pull request once by itself; see claude-review.yml for asking again, and the labels that change it.

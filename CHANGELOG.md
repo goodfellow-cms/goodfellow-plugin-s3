@@ -1,5 +1,11 @@
 # goodfellow-plugin-s3
 
+## 0.2.2
+
+### Patch Changes
+
+- Releases reach npm again: packing the release makes the folder it's packed into, which `npm pack` doesn't, so 0.2.1 never got past packing. This release carries 0.2.1's changes. CI now packs the release as publishing does, on every change, and the workflow's pipes fail when any command in them does.
+
 ## 0.2.1
 
 ### Patch Changes
