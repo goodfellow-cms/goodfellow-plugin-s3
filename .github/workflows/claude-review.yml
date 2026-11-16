@@ -23,9 +23,10 @@
 # It runs on the Claude subscription of whoever made the CLAUDE_CODE_OAUTH_TOKEN secret (`claude setup-token`),
 # and does nothing until there is one. It reads the pull request and runs none of its code: Claude Code loads only
 # the runner's settings, never the pull request's .claude/ settings and their hooks, and runs in a job of its own that
-# can only read. It answers with its findings as data (structured output), which the finish job posts on the pull
-# request it chose, so every way a review starts publishes the same way. Pull requests from
-# forks are never reviewed, since GitHub gives their runs no secrets. A review that fails, such as when the plan's
+# can only read, with files only in the checkout and a git that can't write files or start programs. It answers with
+# its findings as data (structured output), anything shaped like a token withheld, which the finish job posts on the
+# pull request it chose, so every way a review starts publishes the same way. Pull requests from forks are never
+# reviewed, since GitHub gives their runs no secrets. A review that fails, such as when the plan's
 # limit is reached, never fails CI; the "Claude reviewed" status says so instead.
 name: Claude review
 
@@ -194,7 +195,7 @@ jobs:
       group: claude-review-${{ github.event.pull_request.number || inputs.pr }}
     outputs:
       outcome: ${{ steps.claude.outcome }}
-      findings: ${{ steps.claude.outputs.structured_output }}
+      findings: ${{ steps.findings.outputs.findings }}
       skipped: ${{ steps.still.outputs.skipped }}
       usage: ${{ steps.usage.outputs.text }}
     steps:
@@ -276,11 +277,59 @@ jobs:
           base=$(git merge-base "refs/remotes/origin/$BASE" HEAD)
           echo "sha=$base" >> "$GITHUB_OUTPUT"
 
+      # The review may run git's diff, log, show, and blame, whose options can write files (--output) or start
+      # programs that the repository's config names (core.fsmonitor, diff.external, textconv drivers), and whose
+      # paths can name files outside the checkout (diff treats them as --no-index). So the git on the review's PATH
+      # refuses those options and paths, and runs git with every such program turned off, whatever the config says.
+      # Anything else, such as the action's own git, goes to git as it is: the review may run only those four.
+      - name: Keep git to reading
+        id: git
+        if: steps.base.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 1
+        run: |
+          bin="$RUNNER_TEMP/review-bin"
+          mkdir -p "$bin"
+          real=$(command -v git)
+          cat > "$bin/git" <<'GIT'
+          #!/usr/bin/env bash
+          real=__REAL__
+          sub=${1-}
+          case "$sub" in
+            diff | log | show | blame) ;;
+            *) exec "$real" "$@" ;;
+          esac
+          refuse() {
+            echo "git: a review can't use $1" >&2
+            exit 2
+          }
+          for arg in "${@:2}"; do
+            if [[ $arg == --?* ]]; then
+              # Git takes a long option's first letters for the whole of it, so --outp= is --output=.
+              name=${arg%%=*}
+              for refused in --output --ext-diff --textconv --no-index --contents; do
+                if [[ $refused == "$name"* ]]; then refuse "$arg"; fi
+              done
+            elif [[ $arg == /* || $arg == '~'* || $arg == .. || $arg == ../* || $arg == */../* || $arg == */.. ]]; then
+              refuse "$arg"
+            fi
+          done
+          off=(-c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -c core.pager=cat
+            -c gpg.program=false -c gpg.ssh.program=false -c gpg.x509.program=false -c log.showSignature=false)
+          case "$sub" in
+            blame) exec "$real" "${off[@]}" --no-pager blame --no-textconv "${@:2}" ;;
+            *) exec "$real" "${off[@]}" --no-pager "$sub" --no-ext-diff --no-textconv "${@:2}" ;;
+          esac
+          GIT
+          sed -i "s|__REAL__|$real|" "$bin/git"
+          chmod +x "$bin/git"
+          echo "$bin" >> "$GITHUB_PATH"
+
       # A step that runs out of time fails, which continue-on-error catches; the job running out would be cancelled,
       # failing CI, so the review stops well before the job's own limit.
       - name: Review
         id: claude
-        if: steps.base.outcome == 'success'
+        if: steps.base.outcome == 'success' && steps.git.outcome == 'success'
         continue-on-error: true
         timeout-minutes: 35
         uses: anthropics/claude-code-action@9eb012b6d0900c2b9eede65ee1758cec4d2973e9 # v1.0.270
@@ -301,14 +350,36 @@ jobs:
           # github-actions[bot], which the action refuses unless it's named here. No other bot is, and nothing else
           # starts these runs as one.
           allowed_bots: ${{ github.event_name == 'workflow_dispatch' && 'github-actions[bot]' || '' }}
-          # Only what reading needs: no editing, and no commands but reading the pull request and git. Only the
-          # runner's own settings, never the checkout's .claude/ ones, whose hooks would run the pull request's own
-          # commands with this job's token. Findings come back as data, in the schema below, for the finish job.
+          # Only what reading needs: no editing, and no commands but reading the pull request and git (the git the
+          # step before keeps to reading). Files only in the checkout, never the process's own environment under
+          # /proc or Claude Code's settings, which hold what the job signs in with. Only the runner's own settings,
+          # never the checkout's .claude/ ones, whose hooks would run the pull request's own commands with this job's
+          # token. Findings come back as data, in the schema below, for the finish job.
           claude_args: >-
             --model opus
             --setting-sources user
-            --allowedTools "Skill,Agent,Read,Glob,Grep,Bash(gh pr view:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*)"
+            --allowedTools "Skill,Agent,Read(./**),Glob,Grep,Bash(gh pr view:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*)"
+            --disallowedTools "Read(//proc/**),Read(//sys/**),Read(//dev/**),Read(~/.claude/**),Read(~/.config/**)"
             --json-schema '{"type":"object","additionalProperties":false,"required":["findings"],"properties":{"findings":{"type":"array","description":"Every finding of the review, none when it found nothing to raise","items":{"type":"object","additionalProperties":false,"required":["path","line","body"],"properties":{"path":{"type":"string","description":"The file the finding is about, relative to the root of the repository"},"line":{"type":"integer","minimum":1,"description":"The line it is about, in the version of the file in the pull request"},"body":{"type":"string","description":"The finding in Markdown: what is wrong, how it fails, and the fix"}}}}}}'
+
+      # What the review found is posted publicly, so anything in it shaped like a token (an Anthropic key, a GitHub
+      # token) is withheld first, whatever led the review to write it.
+      - name: Withhold anything like a token
+        id: findings
+        if: steps.claude.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          FINDINGS: ${{ steps.claude.outputs.structured_output }}
+        run: |
+          withheld=$(jq -c 'walk(if type == "string" then
+            gsub("(sk-ant-[A-Za-z0-9_-]{8,}|gh[opsur]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|ey[A-Za-z0-9_-]{20,}\\.[A-Za-z0-9_-]{20,}\\.[A-Za-z0-9_-]{10,})"; "[withheld: looked like a token]")
+            else . end)' <<<"$FINDINGS")
+          {
+            echo "findings<<FINDINGS_$GITHUB_RUN_ID"
+            echo "$withheld"
+            echo "FINDINGS_$GITHUB_RUN_ID"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Count what it used
         id: usage
