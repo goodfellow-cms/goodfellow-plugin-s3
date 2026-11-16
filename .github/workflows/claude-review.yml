@@ -284,7 +284,8 @@ jobs:
       # four, those options, and any path or value outside the checkout, and runs git with only the checkout's config
       # (written by the checkout, not the pull request) and every such program off. Anything else, such as the
       # action's own git, goes to git as it is: the review may run only those four. Links in the checkout that lead
-      # outside it are taken out of it first, so neither git nor the review's Read follows one there.
+      # outside it, or into git's own folder, are taken out of it first, so neither git nor the review's Read
+      # follows one there.
       - name: Keep git to reading
         id: git
         if: steps.base.outcome == 'success'
@@ -298,7 +299,8 @@ jobs:
           while IFS= read -r -d '' link; do
             # One that leads nowhere, to a missing file or round in a loop, goes too.
             target=$(realpath -e -- "$link" 2> /dev/null) || target=/
-            if [[ $target != "$top" && $target != "$top"/* ]]; then leaving+=("$link"); fi
+            if [[ ($target != "$top" && $target != "$top"/*) || $target == "$top"/.git || $target == "$top"/.git/* ]]
+            then leaving+=("$link"); fi
           done < <(find . -path ./.git -prune -o -type l -print0)
           for link in "${leaving[@]}"; do
             rm -f -- "$link"
@@ -342,8 +344,11 @@ jobs:
           # Only the checkout's own repository, never one git finds elsewhere, whose config would be its own.
           top=$("$real" rev-parse --show-toplevel 2> /dev/null) || top=
           if [ "$top" != "$checkout" ]; then refuse "a repository other than the checkout"; fi
-          # Whether a path leads outside the checkout: up from it, from a home, or from the root to anywhere else.
+          # Whether a path leads outside the checkout: up from it, from a home, or from the root to anywhere else;
+          # or into git's own folder, whose config can hold the job's token, through pathspec magic (:/, :(top)) too.
+          dotgit='(^|[/:)])\.git(/|$)'
           outside() {
+            if [[ $1 =~ $dotgit ]]; then return 0; fi
             case $1 in
               .. | ../* | */../* | */..) return 0 ;;
               '~'*) return 0 ;;
