@@ -349,6 +349,17 @@ jobs:
           dotgit='(^|[/:)])\.git(/|$)'
           outside() {
             if [[ $1 =~ $dotgit ]]; then return 0; fi
+            # Pathspec magic, :(top) or : with its signs (:/, :!, :^) and an optional closing :, names the path after
+            # it, which git takes as on disk when it's absolute (:(top)/etc/passwd), so that path is checked too.
+            case $1 in
+              ':('*) outside "${1#*)}"; return ;;
+              ':'*)
+                local rest=${1#:}
+                while [[ $rest == [/!^]* ]]; do rest=${rest:1}; done
+                outside "${rest#:}"
+                return
+                ;;
+            esac
             case $1 in
               .. | ../* | */../* | */..) return 0 ;;
               '~'*) return 0 ;;
