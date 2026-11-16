@@ -352,7 +352,8 @@ jobs:
             # Pathspec magic, :(top) or : with its signs (:/, :!, :^) and an optional closing :, names the path after
             # it, which git takes as on disk when it's absolute (:(top)/etc/passwd), so that path is checked too.
             case $1 in
-              ':('*) outside "${1#*)}"; return ;;
+              # Magic that never closes, which git refuses too, is refused rather than taken apart.
+              ':('*) if [[ $1 != *')'* ]]; then return 0; fi; outside "${1#*)}"; return ;;
               ':'*)
                 local rest=${1#:}
                 while [[ $rest == [/!^]* ]]; do rest=${rest:1}; done
