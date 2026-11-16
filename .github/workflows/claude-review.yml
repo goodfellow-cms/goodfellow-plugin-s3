@@ -411,6 +411,10 @@ jobs:
         continue-on-error: true
         timeout-minutes: 35
         uses: anthropics/claude-code-action@9eb012b6d0900c2b9eede65ee1758cec4d2973e9 # v1.0.270
+        # The commands Claude Code runs get its environment without the Claude token, which they could otherwise print
+        # in some form the step that withholds tokens doesn't know.
+        env:
+          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
@@ -430,15 +434,15 @@ jobs:
           allowed_bots: ${{ github.event_name == 'workflow_dispatch' && 'github-actions[bot]' || '' }}
           # Read, Glob, and Grep never reach outside the checkout, whatever the rules below allow them.
           settings: '{"permissions":{"blockReadsOutsideWorkingDirectories":true}}'
-          # Only what reading needs: no editing, and no commands but reading the pull request and git (the git the
-          # step before keeps to reading). Files only in the checkout (the settings above), and never the process's own
+          # Only what reading needs: no editing, and no commands but git (the git the step before keeps to reading),
+          # never gh, whose --jq can print any of its environment. Files only in the checkout (the settings above), and never the process's own
           # environment under /proc or Claude Code's settings and state, which hold what the job signs in with. Only the runner's own settings,
           # never the checkout's .claude/ ones, whose hooks would run the pull request's own commands with this job's
           # token. Findings come back as data, in the schema below, for the finish job.
           claude_args: >-
             --model opus
             --setting-sources user
-            --allowedTools "Skill,Agent,Read(./**),Glob,Grep,Bash(gh pr view:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*)"
+            --allowedTools "Skill,Agent,Read(./**),Glob,Grep,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*)"
             --disallowedTools "Read(//proc/**),Read(//sys/**),Read(//dev/**),Read(~/.claude/**),Read(~/.claude.json),Read(~/.claude.json.*),Read(~/.config/**),Read(./.git/**)"
             --json-schema '{"type":"object","additionalProperties":false,"required":["findings"],"properties":{"findings":{"type":"array","description":"Every finding of the review, none when it found nothing to raise","items":{"type":"object","additionalProperties":false,"required":["path","line","body"],"properties":{"path":{"type":"string","description":"The file the finding is about, relative to the root of the repository"},"line":{"type":"integer","minimum":1,"description":"The line it is about, in the version of the file in the pull request"},"body":{"type":"string","description":"The finding in Markdown: what is wrong, how it fails, and the fix"}}}}}}'
 
