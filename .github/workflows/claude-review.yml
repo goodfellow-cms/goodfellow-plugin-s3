@@ -403,11 +403,30 @@ jobs:
           chmod +x "$bin/git"
           echo "$bin" >> "$GITHUB_PATH"
 
+      # CLAUDE_CODE_SUBPROCESS_ENV_SCRUB runs the review's commands in a sandbox, which needs bubblewrap and socat:
+      # without bubblewrap Claude Code doesn't start, and without socat every command it runs fails. The action
+      # installs them only for reviews of people who can't write, so this does, as the action does, lifting the
+      # AppArmor limit on the user namespaces bubblewrap uses where Ubuntu sets it, and tries the sandbox once.
+      - name: Give the review's commands their sandbox
+        id: sandbox
+        if: steps.base.outcome == 'success' && steps.git.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          if ! command -v bwrap > /dev/null || ! command -v socat > /dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends bubblewrap socat
+          fi
+          if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2> /dev/null)" = 1 ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --ro-bind / / --unshare-pid true
+
       # A step that runs out of time fails, which continue-on-error catches; the job running out would be cancelled,
       # failing CI, so the review stops well before the job's own limit.
       - name: Review
         id: claude
-        if: steps.base.outcome == 'success' && steps.git.outcome == 'success'
+        if: steps.base.outcome == 'success' && steps.git.outcome == 'success' && steps.sandbox.outcome == 'success'
         continue-on-error: true
         timeout-minutes: 35
         uses: anthropics/claude-code-action@9eb012b6d0900c2b9eede65ee1758cec4d2973e9 # v1.0.270
