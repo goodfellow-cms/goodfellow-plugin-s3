@@ -443,18 +443,24 @@ jobs:
             --json-schema '{"type":"object","additionalProperties":false,"required":["findings"],"properties":{"findings":{"type":"array","description":"Every finding of the review, none when it found nothing to raise","items":{"type":"object","additionalProperties":false,"required":["path","line","body"],"properties":{"path":{"type":"string","description":"The file the finding is about, relative to the root of the repository"},"line":{"type":"integer","minimum":1,"description":"The line it is about, in the version of the file in the pull request"},"body":{"type":"string","description":"The finding in Markdown: what is wrong, how it fails, and the fix"}}}}}}'
 
       # What the review found is posted publicly, so anything in it shaped like a token (an Anthropic key, a GitHub
-      # token) is withheld first, whatever led the review to write it.
+      # token) is withheld first, whatever led the review to write it. The findings are read from the review's own
+      # record, the structured output the action reports, never handed to the step in env:, whose values the runner
+      # writes into the job's public log before the step starts.
       - name: Withhold anything like a token
         id: findings
         if: steps.claude.outcome == 'success'
         continue-on-error: true
         timeout-minutes: 1
         env:
-          FINDINGS: ${{ steps.claude.outputs.structured_output }}
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
         run: |
-          withheld=$(jq -c 'walk(if type == "string" then
-            gsub("(sk-ant-[A-Za-z0-9_-]{8,}|gh[opsur]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,})"; "[withheld: looked like a token]")
-            else . end)' <<<"$FINDINGS")
+          withheld=''
+          if [ -n "$EXECUTION_FILE" ] && [ -f "$EXECUTION_FILE" ]; then
+            withheld=$(jq -c '[.[] | select(.type == "result")] | last // {} | .structured_output // empty
+              | walk(if type == "string" then
+                gsub("(sk-ant-[A-Za-z0-9_-]{8,}|gh[opsur]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,})"; "[withheld: looked like a token]")
+                else . end)' "$EXECUTION_FILE")
+          fi
           {
             echo "findings<<FINDINGS_$GITHUB_RUN_ID"
             echo "$withheld"
