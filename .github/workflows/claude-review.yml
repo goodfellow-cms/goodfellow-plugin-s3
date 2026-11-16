@@ -451,8 +451,10 @@ jobs:
           # github-actions[bot], which the action refuses unless it's named here. No other bot is, and nothing else
           # starts these runs as one.
           allowed_bots: ${{ github.event_name == 'workflow_dispatch' && 'github-actions[bot]' || '' }}
-          # Read, Glob, and Grep never reach outside the checkout, whatever the rules below allow them.
-          settings: '{"permissions":{"blockReadsOutsideWorkingDirectories":true}}'
+          # Read, Glob, and Grep never reach outside the checkout, whatever the rules below allow them. The commands'
+          # sandbox follows the same rule, so it's given the folder of the git that keeps git to reading: without it,
+          # that git isn't there for them, and plain git, which reads anything in the checkout, runs in its place.
+          settings: '{"permissions":{"blockReadsOutsideWorkingDirectories":true},"sandbox":{"filesystem":{"allowRead":["${{ runner.temp }}/review-bin"]}}}'
           # Only what reading needs: no editing, and no commands but git (the git the step before keeps to reading),
           # never gh, whose --jq can print any of its environment. Files only in the checkout (the settings above), and never the process's own
           # environment under /proc or Claude Code's settings and state, which hold what the job signs in with. Only the runner's own settings,
