@@ -277,48 +277,103 @@ jobs:
           base=$(git merge-base "refs/remotes/origin/$BASE" HEAD)
           echo "sha=$base" >> "$GITHUB_OUTPUT"
 
-      # The review may run git's diff, log, show, and blame, whose options can write files (--output) or start
-      # programs that the repository's config names (core.fsmonitor, diff.external, textconv drivers), and whose
-      # paths can name files outside the checkout (diff treats them as --no-index). So the git on the review's PATH
-      # refuses those options and paths, and runs git with every such program turned off, whatever the config says.
-      # Anything else, such as the action's own git, goes to git as it is: the review may run only those four.
+      # The review may run git's diff, log, show, and blame, whose options can write files (--output), start programs
+      # that config names (core.fsmonitor, filter and diff drivers, textconv, gpg), and name files outside the
+      # checkout, as paths (which diff treats as --no-index) or as options' values (--orderfile, -O, blame's
+      # --ignore-revs-file and -S, --contents). So the git on the review's PATH refuses git's own options before those
+      # four, those options, and any path or value outside the checkout, and runs git with only the checkout's config
+      # (written by the checkout, not the pull request) and every such program off. Anything else, such as the
+      # action's own git, goes to git as it is: the review may run only those four. Links in the checkout that lead
+      # outside it are taken out of it first, so neither git nor the review's Read follows one there.
       - name: Keep git to reading
         id: git
         if: steps.base.outcome == 'success'
         continue-on-error: true
-        timeout-minutes: 1
+        timeout-minutes: 2
         run: |
+          real=$(command -v git)
+          top=$(pwd -P)
+          # Every link's end is found before any goes, since a link to one that goes would lead nowhere by then.
+          leaving=()
+          while IFS= read -r -d '' link; do
+            # One whose end can't be found counts as leading outside.
+            target=$(realpath -m -- "$link" 2> /dev/null) || target=/
+            if [[ $target != "$top" && $target != "$top"/* ]]; then leaving+=("$link"); fi
+          done < <(find . -path ./.git -prune -o -type l -print0)
+          for link in "${leaving[@]}"; do
+            rm -f -- "$link"
+            # Git still has it, so a diff of the working tree doesn't show it as deleted.
+            "$real" update-index --skip-worktree -- "$link" 2> /dev/null || true
+          done
           bin="$RUNNER_TEMP/review-bin"
           mkdir -p "$bin"
-          real=$(command -v git)
           cat > "$bin/git" <<'GIT'
           #!/usr/bin/env bash
           real=__REAL__
-          sub=${1-}
-          case "$sub" in
-            diff | log | show | blame) ;;
-            *) exec "$real" "$@" ;;
-          esac
           refuse() {
             echo "git: a review can't use $1" >&2
             exit 2
           }
-          for arg in "${@:2}"; do
+          args=("$@")
+          sub=
+          lead=
+          for ((i = 0; i < ${#args[@]}; i++)); do
+            case ${args[i]} in
+              -c | -C | --git-dir | --work-tree | --namespace | --config-env | --super-prefix) lead=${args[i]}; ((i++)) ;;
+              -*) lead=${args[i]} ;;
+              *) sub=${args[i]}; break ;;
+            esac
+          done
+          case "$sub" in
+            diff | log | show | blame) ;;
+            *) exec "$real" "$@" ;;
+          esac
+          # Only the action's own git puts git's options first.
+          if [ -n "$lead" ]; then refuse "$lead before $sub"; fi
+          top=$("$real" rev-parse --show-toplevel 2> /dev/null) || top=
+          # Whether a path leads outside the checkout: up from it, from a home, or from the root to anywhere else.
+          outside() {
+            case $1 in
+              .. | ../* | */../* | */..) return 0 ;;
+              '~'*) return 0 ;;
+              /*) [[ -z $top || ($1 != "$top" && $1 != "$top"/*) ]] ;;
+              *) return 1 ;;
+            esac
+          }
+          for arg in "${args[@]:i+1}"; do
             if [[ $arg == --?* ]]; then
-              # Git takes a long option's first letters for the whole of it, so --outp= is --output=.
+              # Git takes a long option's first letters for the whole of it, so --outp= is --output=; --text is one
+              # of its own, not the start of --textconv.
               name=${arg%%=*}
-              for refused in --output --ext-diff --textconv --no-index --contents; do
-                if [[ $refused == "$name"* ]]; then refuse "$arg"; fi
+              if [ "$name" != --text ]; then
+                for refused in --output --ext-diff --textconv --no-index --contents; do
+                  if [[ $refused == "$name"* ]]; then refuse "$arg"; fi
+                done
+              fi
+              if [[ $arg == *=* ]] && outside "${arg#*=}"; then refuse "$arg"; fi
+            elif [[ $arg == -L* ]]; then
+              # -L names lines of a file in a commit, never one on disk.
+              :
+            elif [[ $arg == -?* ]]; then
+              # A short option's value can follow it at once, after others (-pO/etc/passwd).
+              for ((k = 2; k < ${#arg}; k++)); do
+                if outside "${arg:k}"; then refuse "$arg"; fi
               done
-            elif [[ $arg == /* || $arg == '~'* || $arg == .. || $arg == ../* || $arg == */../* || $arg == */.. ]]; then
+            elif outside "$arg"; then
               refuse "$arg"
             fi
           done
-          off=(-c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -c core.pager=cat
-            -c gpg.program=false -c gpg.ssh.program=false -c gpg.x509.program=false -c log.showSignature=false)
+          # Only the checkout's config, never the system's or the user's (where filter drivers such as Git LFS's
+          # are), and nothing the environment adds.
+          unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_EXTERNAL_DIFF GIT_PAGER
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+          # What the checkout's config could still start: --no-ext-diff and --no-textconv turn off diff and textconv
+          # drivers, and --no-pager the pager.
+          off=(-c core.fsmonitor=false -c gpg.program=false -c gpg.ssh.program=false -c gpg.x509.program=false
+            -c log.showSignature=false)
           case "$sub" in
-            blame) exec "$real" "${off[@]}" --no-pager blame --no-textconv "${@:2}" ;;
-            *) exec "$real" "${off[@]}" --no-pager "$sub" --no-ext-diff --no-textconv "${@:2}" ;;
+            blame) exec "$real" "${off[@]}" --no-pager blame --no-textconv "${args[@]:i+1}" ;;
+            *) exec "$real" "${off[@]}" --no-pager "$sub" --no-ext-diff --no-textconv "${args[@]:i+1}" ;;
           esac
           GIT
           sed -i "s|__REAL__|$real|" "$bin/git"
@@ -350,16 +405,18 @@ jobs:
           # github-actions[bot], which the action refuses unless it's named here. No other bot is, and nothing else
           # starts these runs as one.
           allowed_bots: ${{ github.event_name == 'workflow_dispatch' && 'github-actions[bot]' || '' }}
+          # Read, Glob, and Grep never reach outside the checkout, whatever the rules below allow them.
+          settings: '{"permissions":{"blockReadsOutsideWorkingDirectories":true}}'
           # Only what reading needs: no editing, and no commands but reading the pull request and git (the git the
-          # step before keeps to reading). Files only in the checkout, never the process's own environment under
-          # /proc or Claude Code's settings, which hold what the job signs in with. Only the runner's own settings,
+          # step before keeps to reading). Files only in the checkout (the settings above), and never the process's own
+          # environment under /proc or Claude Code's settings and state, which hold what the job signs in with. Only the runner's own settings,
           # never the checkout's .claude/ ones, whose hooks would run the pull request's own commands with this job's
           # token. Findings come back as data, in the schema below, for the finish job.
           claude_args: >-
             --model opus
             --setting-sources user
             --allowedTools "Skill,Agent,Read(./**),Glob,Grep,Bash(gh pr view:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*)"
-            --disallowedTools "Read(//proc/**),Read(//sys/**),Read(//dev/**),Read(~/.claude/**),Read(~/.config/**)"
+            --disallowedTools "Read(//proc/**),Read(//sys/**),Read(//dev/**),Read(~/.claude/**),Read(~/.claude.json),Read(~/.claude.json.*),Read(~/.config/**)"
             --json-schema '{"type":"object","additionalProperties":false,"required":["findings"],"properties":{"findings":{"type":"array","description":"Every finding of the review, none when it found nothing to raise","items":{"type":"object","additionalProperties":false,"required":["path","line","body"],"properties":{"path":{"type":"string","description":"The file the finding is about, relative to the root of the repository"},"line":{"type":"integer","minimum":1,"description":"The line it is about, in the version of the file in the pull request"},"body":{"type":"string","description":"The finding in Markdown: what is wrong, how it fails, and the fix"}}}}}}'
 
       # What the review found is posted publicly, so anything in it shaped like a token (an Anthropic key, a GitHub
