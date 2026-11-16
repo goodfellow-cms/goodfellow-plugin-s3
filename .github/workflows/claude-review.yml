@@ -296,8 +296,8 @@ jobs:
           # Every link's end is found before any goes, since a link to one that goes would lead nowhere by then.
           leaving=()
           while IFS= read -r -d '' link; do
-            # One whose end can't be found counts as leading outside.
-            target=$(realpath -m -- "$link" 2> /dev/null) || target=/
+            # One that leads nowhere, to a missing file or round in a loop, goes too.
+            target=$(realpath -e -- "$link" 2> /dev/null) || target=/
             if [[ $target != "$top" && $target != "$top"/* ]]; then leaving+=("$link"); fi
           done < <(find . -path ./.git -prune -o -type l -print0)
           for link in "${leaving[@]}"; do
