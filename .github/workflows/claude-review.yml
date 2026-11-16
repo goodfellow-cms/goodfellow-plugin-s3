@@ -310,6 +310,7 @@ jobs:
           cat > "$bin/git" <<'GIT'
           #!/usr/bin/env bash
           real=__REAL__
+          checkout='__TOP__'
           refuse() {
             echo "git: a review can't use $1" >&2
             exit 2
@@ -330,7 +331,9 @@ jobs:
           esac
           # Only the action's own git puts git's options first.
           if [ -n "$lead" ]; then refuse "$lead before $sub"; fi
+          # Only the checkout's own repository, never one git finds elsewhere, whose config would be its own.
           top=$("$real" rev-parse --show-toplevel 2> /dev/null) || top=
+          if [ "$top" != "$checkout" ]; then refuse "a repository other than the checkout"; fi
           # Whether a path leads outside the checkout: up from it, from a home, or from the root to anywhere else.
           outside() {
             case $1 in
@@ -376,7 +379,7 @@ jobs:
             *) exec "$real" "${off[@]}" --no-pager "$sub" --no-ext-diff --no-textconv "${args[@]:i+1}" ;;
           esac
           GIT
-          sed -i "s|__REAL__|$real|" "$bin/git"
+          sed -i "s|__REAL__|$real|; s|__TOP__|$top|" "$bin/git"
           chmod +x "$bin/git"
           echo "$bin" >> "$GITHUB_PATH"
 
@@ -430,7 +433,7 @@ jobs:
           FINDINGS: ${{ steps.claude.outputs.structured_output }}
         run: |
           withheld=$(jq -c 'walk(if type == "string" then
-            gsub("(sk-ant-[A-Za-z0-9_-]{8,}|gh[opsur]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|ey[A-Za-z0-9_-]{20,}\\.[A-Za-z0-9_-]{20,}\\.[A-Za-z0-9_-]{10,})"; "[withheld: looked like a token]")
+            gsub("(sk-ant-[A-Za-z0-9_-]{8,}|gh[opsur]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,})"; "[withheld: looked like a token]")
             else . end)' <<<"$FINDINGS")
           {
             echo "findings<<FINDINGS_$GITHUB_RUN_ID"
