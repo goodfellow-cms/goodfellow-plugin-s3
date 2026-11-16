@@ -320,14 +320,22 @@ jobs:
           lead=
           for ((i = 0; i < ${#args[@]}; i++)); do
             case ${args[i]} in
-              -c | -C | --git-dir | --work-tree | --namespace | --config-env | --super-prefix) lead=${args[i]}; ((i++)) ;;
+              -c | -C | --git-dir | --work-tree | --namespace | --config-env | --super-prefix | --attr-source | \
+                --shallow-file) lead=${args[i]}; ((i++)) ;;
               -*) lead=${args[i]} ;;
               *) sub=${args[i]}; break ;;
             esac
           done
           case "$sub" in
             diff | log | show | blame) ;;
-            *) exec "$real" "$@" ;;
+            # Anything else is the action's own git, which names git's own commands: never an alias, which could
+            # be any command or program, nor the value of an option this scan doesn't know takes one.
+            *)
+              if [ -n "$sub" ] && ! "$real" --list-cmds=main | grep -qxF -- "$sub"; then
+                refuse "$sub, which isn't one of git's own commands"
+              fi
+              exec "$real" "$@"
+              ;;
           esac
           # Only the action's own git puts git's options first.
           if [ -n "$lead" ]; then refuse "$lead before $sub"; fi
