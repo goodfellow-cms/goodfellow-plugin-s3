@@ -427,7 +427,7 @@ jobs:
             --model opus
             --setting-sources user
             --allowedTools "Skill,Agent,Read(./**),Glob,Grep,Bash(gh pr view:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*)"
-            --disallowedTools "Read(//proc/**),Read(//sys/**),Read(//dev/**),Read(~/.claude/**),Read(~/.claude.json),Read(~/.claude.json.*),Read(~/.config/**)"
+            --disallowedTools "Read(//proc/**),Read(//sys/**),Read(//dev/**),Read(~/.claude/**),Read(~/.claude.json),Read(~/.claude.json.*),Read(~/.config/**),Read(./.git/**)"
             --json-schema '{"type":"object","additionalProperties":false,"required":["findings"],"properties":{"findings":{"type":"array","description":"Every finding of the review, none when it found nothing to raise","items":{"type":"object","additionalProperties":false,"required":["path","line","body"],"properties":{"path":{"type":"string","description":"The file the finding is about, relative to the root of the repository"},"line":{"type":"integer","minimum":1,"description":"The line it is about, in the version of the file in the pull request"},"body":{"type":"string","description":"The finding in Markdown: what is wrong, how it fails, and the fix"}}}}}}'
 
       # What the review found is posted publicly, so anything in it shaped like a token (an Anthropic key, a GitHub
