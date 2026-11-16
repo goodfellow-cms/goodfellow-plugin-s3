@@ -345,22 +345,10 @@ jobs:
           top=$("$real" rev-parse --show-toplevel 2> /dev/null) || top=
           if [ "$top" != "$checkout" ]; then refuse "a repository other than the checkout"; fi
           # Whether a path leads outside the checkout: up from it, from a home, or from the root to anywhere else;
-          # or into git's own folder, whose config can hold the job's token, through pathspec magic (:/, :(top)) too.
+          # or into git's own folder, whose config can hold the job's token, however it's spelled.
           dotgit='(^|[/:)])\.git(/|$)'
           outside() {
             if [[ $1 =~ $dotgit ]]; then return 0; fi
-            # Pathspec magic, :(top) or : with its signs (:/, :!, :^) and an optional closing :, names the path after
-            # it, which git takes as on disk when it's absolute (:(top)/etc/passwd), so that path is checked too.
-            case $1 in
-              # Magic that never closes, which git refuses too, is refused rather than taken apart.
-              ':('*) if [[ $1 != *')'* ]]; then return 0; fi; outside "${1#*)}"; return ;;
-              ':'*)
-                local rest=${1#:}
-                while [[ $rest == [/!^]* ]]; do rest=${rest:1}; done
-                outside "${rest#:}"
-                return
-                ;;
-            esac
             case $1 in
               .. | ../* | */../* | */..) return 0 ;;
               '~'*) return 0 ;;
@@ -395,6 +383,10 @@ jobs:
           # are), and nothing the environment adds.
           unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_EXTERNAL_DIFF GIT_PAGER
           export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+          # Pathspecs are taken as written: magic such as :(top)/etc/passwd would name a file on disk past the checks
+          # above, so git never reads it (and the review loses :! and :(top), which it can do without).
+          unset GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS
+          export GIT_LITERAL_PATHSPECS=1
           # What the checkout's config could still start: --no-ext-diff and --no-textconv turn off diff and textconv
           # drivers, and --no-pager the pager.
           off=(-c core.fsmonitor=false -c gpg.program=false -c gpg.ssh.program=false -c gpg.x509.program=false
