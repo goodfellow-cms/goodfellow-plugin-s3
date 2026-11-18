@@ -68,8 +68,11 @@ function reportOf(run: AuditRun, what: string): AuditReport | string {
   const noReport = () => run.stderr?.trim() || `npm audit${what} gave no report.`;
   if (!isRecord(report)) return noReport();
   // Such as the registry not answering: that's not an audit that passed.
-  const error = (report as AuditReport).error;
-  if (error) return `npm audit${what} didn't run: ${error.summary ?? JSON.stringify(error)}`;
+  const error = report.error;
+  if (error) {
+    const summary = isRecord(error) && typeof error.summary === "string" ? error.summary : JSON.stringify(error);
+    return `npm audit${what} didn't run: ${summary}`;
+  }
   // npm 6 wrote its advisories another way, which this doesn't read.
   if (!("vulnerabilities" in report) && "advisories" in report) {
     return `npm audit${what} wrote npm 6's report, which this doesn't read: run it with npm 7 or later.`;
