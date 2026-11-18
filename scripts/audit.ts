@@ -49,7 +49,14 @@ export function unignoredAdvisories(report: AuditReport, ignored: Record<string,
   return [...advisories(report)].filter(([id]) => !isIgnored(id, ignored)).map(([, line]) => line);
 }
 
-/** A run's report, or why there's none: npm not starting, no JSON, or npm saying it couldn't audit. */
+/** Whether a value is a JSON object, not a list or `null`. */
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * A run's report, or why there's none: npm not starting, no JSON, npm saying it couldn't audit, npm 6's report, or a
+ * report that doesn't list its vulnerabilities as npm does, with what npm wrote to stderr where it wrote anything.
+ */
 function reportOf(run: AuditRun, what: string): AuditReport | string {
   if (run.error) return `npm audit${what} didn't start: ${run.error.message}`;
   let report: unknown;
@@ -58,10 +65,26 @@ function reportOf(run: AuditRun, what: string): AuditReport | string {
   } catch {
     return run.stderr?.trim() || `npm audit${what} gave no report.`;
   }
-  if (typeof report !== "object" || report === null) return `npm audit${what} gave no report.`;
+  const noReport = () => run.stderr?.trim() || `npm audit${what} gave no report.`;
+  if (!isRecord(report)) return noReport();
   // Such as the registry not answering: that's not an audit that passed.
-  const error = (report as AuditReport).error;
-  if (error) return `npm audit${what} didn't run: ${error.summary ?? JSON.stringify(error)}`;
+  const error = report.error;
+  if (error) {
+    const summary = isRecord(error) && typeof error.summary === "string" ? error.summary : JSON.stringify(error);
+    return `npm audit${what} didn't run: ${summary}`;
+  }
+  // npm 6 wrote its advisories another way, which this doesn't read.
+  if (!("vulnerabilities" in report) && "advisories" in report) {
+    return `npm audit${what} wrote npm 6's report, which this doesn't read: run it with npm 7 or later.`;
+  }
+  // Every report npm writes lists its vulnerabilities, none included, each with what it's through, so one without them
+  // isn't an audit that passed.
+  const vulnerabilities = report.vulnerabilities;
+  if (!isRecord(vulnerabilities)) return noReport();
+  const readable = Object.values(vulnerabilities).every(
+    (vulnerability) => isRecord(vulnerability) && (vulnerability.via === undefined || Array.isArray(vulnerability.via)),
+  );
+  if (!readable) return noReport();
   return report as AuditReport;
 }
 
