@@ -77,8 +77,15 @@ describe("the audit", () => {
       lines: ["npm ERR! oops"],
     });
     expect(auditOutcome({ stdout: "null", stderr: "" }, ran(none)).failed).toBe(true);
-    // A report that lists no vulnerabilities at all, not even none, isn't one npm writes.
-    for (const stdout of ["{}", "[]", '{"vulnerabilities":[]}', '{"vulnerabilities":null}']) {
+    // A report that lists no vulnerabilities at all, not even none, or lists them otherwise, isn't one npm writes.
+    for (const stdout of [
+      "{}",
+      "[]",
+      '{"vulnerabilities":[]}',
+      '{"vulnerabilities":null}',
+      '{"vulnerabilities":{"x":null}}',
+      '{"vulnerabilities":{"x":{"via":{}}}}',
+    ]) {
       expect(auditOutcome({ stdout, stderr: "" }, ran(none)), stdout).toEqual({
         failed: true,
         lines: ["npm audit gave no report."],
@@ -87,6 +94,13 @@ describe("the audit", () => {
         "npm audit --omit=dev gave no report.",
       ]);
     }
+    // Where npm said why, that's what's printed.
+    expect(auditOutcome({ stdout: "{}", stderr: "npm ERR! no lockfile\n" }, ran(none)).lines).toEqual([
+      "npm ERR! no lockfile",
+    ]);
+    expect(auditOutcome({ stdout: '{"advisories":{},"metadata":{}}', stderr: "" }, ran(none)).lines).toEqual([
+      "npm audit wrote npm 6's report, which this doesn't read: run it with npm 7 or later.",
+    ]);
     expect(auditOutcome(ran(none), ran({ error: { summary: "registry down" } }))).toEqual({
       failed: true,
       lines: ["npm audit --omit=dev didn't run: registry down"],
