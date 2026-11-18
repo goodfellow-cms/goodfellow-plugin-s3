@@ -23,9 +23,10 @@
 # It runs on the Claude subscription of whoever made the CLAUDE_CODE_OAUTH_TOKEN secret (`claude setup-token`),
 # and does nothing until there is one. It reads the pull request and runs none of its code: Claude Code loads only
 # the runner's settings, never the pull request's .claude/ settings and their hooks, and runs in a job of its own that
-# can only read. It answers with its findings as data (structured output), which the finish job posts on the pull
-# request it chose, so every way a review starts publishes the same way. Pull requests from
-# forks are never reviewed, since GitHub gives their runs no secrets. A review that fails, such as when the plan's
+# can only read, with files only in the checkout and a git that can't write files or start programs. It answers with
+# its findings as data (structured output), anything shaped like a token withheld, which the finish job posts on the
+# pull request it chose, so every way a review starts publishes the same way. Pull requests from forks are never
+# reviewed, since GitHub gives their runs no secrets. A review that fails, such as when the plan's
 # limit is reached, never fails CI; the "Claude reviewed" status says so instead.
 name: Claude review
 
@@ -194,7 +195,7 @@ jobs:
       group: claude-review-${{ github.event.pull_request.number || inputs.pr }}
     outputs:
       outcome: ${{ steps.claude.outcome }}
-      findings: ${{ steps.claude.outputs.structured_output }}
+      findings: ${{ steps.findings.outputs.findings }}
       skipped: ${{ steps.still.outputs.skipped }}
       usage: ${{ steps.usage.outputs.text }}
     steps:
@@ -276,14 +277,163 @@ jobs:
           base=$(git merge-base "refs/remotes/origin/$BASE" HEAD)
           echo "sha=$base" >> "$GITHUB_OUTPUT"
 
+      # The review may run git's diff, log, show, and blame, whose options can write files (--output), start programs
+      # that config names (core.fsmonitor, filter and diff drivers, textconv, gpg), and name files outside the
+      # checkout, as paths (which diff treats as --no-index) or as options' values (--orderfile, -O, blame's
+      # --ignore-revs-file and -S, --contents). So the git on the review's PATH refuses git's own options before those
+      # four, those options, and any path or value outside the checkout, and runs git with only the checkout's config
+      # (written by the checkout, not the pull request) and every such program off. Anything else, such as the
+      # action's own git, goes to git as it is: the review may run only those four. Links in the checkout that lead
+      # outside it, or into git's own folder, are taken out of it first, so neither git nor the review's Read
+      # follows one there.
+      - name: Keep git to reading
+        id: git
+        if: steps.base.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 2
+        run: |
+          real=$(command -v git)
+          top=$(pwd -P)
+          # Every link's end is found before any goes, since a link to one that goes would lead nowhere by then.
+          leaving=()
+          while IFS= read -r -d '' link; do
+            # One that leads nowhere, to a missing file or round in a loop, goes too.
+            target=$(realpath -e -- "$link" 2> /dev/null) || target=/
+            if [[ ($target != "$top" && $target != "$top"/*) || $target == "$top"/.git || $target == "$top"/.git/* ]]
+            then leaving+=("$link"); fi
+          done < <(find . -path ./.git -prune -o -type l -print0)
+          for link in "${leaving[@]}"; do
+            rm -f -- "$link"
+            # Git still has it, so a diff of the working tree doesn't show it as deleted.
+            "$real" update-index --skip-worktree -- "$link" 2> /dev/null || true
+          done
+          bin="$RUNNER_TEMP/review-bin"
+          mkdir -p "$bin"
+          cat > "$bin/git" <<'GIT'
+          #!/usr/bin/env bash
+          real=__REAL__
+          checkout='__TOP__'
+          refuse() {
+            echo "git: a review can't use $1" >&2
+            exit 2
+          }
+          args=("$@")
+          sub=
+          lead=
+          for ((i = 0; i < ${#args[@]}; i++)); do
+            case ${args[i]} in
+              -c | -C | --git-dir | --work-tree | --namespace | --config-env | --super-prefix | --attr-source | \
+                --shallow-file) lead=${args[i]}; ((i++)) ;;
+              -*) lead=${args[i]} ;;
+              *) sub=${args[i]}; break ;;
+            esac
+          done
+          case "$sub" in
+            diff | log | show | blame) ;;
+            # Anything else is the action's own git, which names git's own commands: never an alias, which could
+            # be any command or program, nor the value of an option this scan doesn't know takes one. Claude Code
+            # sets CLAUDECODE in the commands it runs, which get only those four: git's others print its config
+            # (config, remote, ls-remote --get-url, var -l), where the action can keep the job's token.
+            *)
+              if [ -n "${CLAUDECODE:-}" ]; then refuse "${sub:-git without a command} in the review"; fi
+              if [ -n "$sub" ] && ! "$real" --list-cmds=main | grep -qxF -- "$sub"; then
+                refuse "$sub, which isn't one of git's own commands"
+              fi
+              exec "$real" "$@"
+              ;;
+          esac
+          # Only the action's own git puts git's options first.
+          if [ -n "$lead" ]; then refuse "$lead before $sub"; fi
+          # Only the checkout's own repository, never one git finds elsewhere, whose config would be its own.
+          top=$("$real" rev-parse --show-toplevel 2> /dev/null) || top=
+          if [ "$top" != "$checkout" ]; then refuse "a repository other than the checkout"; fi
+          # Whether a path leads outside the checkout: up from it, from a home, or from the root to anywhere else;
+          # or into git's own folder, whose config can hold the job's token, however it's spelled.
+          dotgit='(^|[/:)])\.git(/|$)'
+          outside() {
+            if [[ $1 =~ $dotgit ]]; then return 0; fi
+            case $1 in
+              .. | ../* | */../* | */..) return 0 ;;
+              '~'*) return 0 ;;
+              /*) [[ -z $top || ($1 != "$top" && $1 != "$top"/*) ]] ;;
+              *) return 1 ;;
+            esac
+          }
+          for arg in "${args[@]:i+1}"; do
+            if [[ $arg == --?* ]]; then
+              # Git takes a long option's first letters for the whole of it, so --outp= is --output=; --text is one
+              # of its own, not the start of --textconv.
+              name=${arg%%=*}
+              if [ "$name" != --text ]; then
+                for refused in --output --ext-diff --textconv --no-index --contents; do
+                  if [[ $refused == "$name"* ]]; then refuse "$arg"; fi
+                done
+              fi
+              if [[ $arg == *=* ]] && outside "${arg#*=}"; then refuse "$arg"; fi
+            elif [[ $arg == -L* ]]; then
+              # -L names lines of a file in a commit, never one on disk.
+              :
+            elif [[ $arg == -?* ]]; then
+              # A short option's value can follow it at once, after others (-pO/etc/passwd).
+              for ((k = 2; k < ${#arg}; k++)); do
+                if outside "${arg:k}"; then refuse "$arg"; fi
+              done
+            elif outside "$arg"; then
+              refuse "$arg"
+            fi
+          done
+          # Only the checkout's config, never the system's or the user's (where filter drivers such as Git LFS's
+          # are), and nothing the environment adds.
+          unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_EXTERNAL_DIFF GIT_PAGER
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+          # Pathspecs are taken as written: magic such as :(top)/etc/passwd would name a file on disk past the checks
+          # above, so git never reads it (and the review loses :! and :(top), which it can do without).
+          unset GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS
+          export GIT_LITERAL_PATHSPECS=1
+          # What the checkout's config could still start: --no-ext-diff and --no-textconv turn off diff and textconv
+          # drivers, and --no-pager the pager.
+          off=(-c core.fsmonitor=false -c gpg.program=false -c gpg.ssh.program=false -c gpg.x509.program=false
+            -c log.showSignature=false)
+          case "$sub" in
+            blame) exec "$real" "${off[@]}" --no-pager blame --no-textconv "${args[@]:i+1}" ;;
+            *) exec "$real" "${off[@]}" --no-pager "$sub" --no-ext-diff --no-textconv "${args[@]:i+1}" ;;
+          esac
+          GIT
+          sed -i "s|__REAL__|$real|; s|__TOP__|$top|" "$bin/git"
+          chmod +x "$bin/git"
+          echo "$bin" >> "$GITHUB_PATH"
+
+      # CLAUDE_CODE_SUBPROCESS_ENV_SCRUB runs the review's commands in a sandbox, which needs bubblewrap and socat:
+      # without bubblewrap Claude Code doesn't start, and without socat every command it runs fails. The action
+      # installs them only for reviews of people who can't write, so this does, as the action does, lifting the
+      # AppArmor limit on the user namespaces bubblewrap uses where Ubuntu sets it, and tries the sandbox once.
+      - name: Give the review's commands their sandbox
+        id: sandbox
+        if: steps.base.outcome == 'success' && steps.git.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          if ! command -v bwrap > /dev/null || ! command -v socat > /dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends bubblewrap socat
+          fi
+          if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2> /dev/null)" = 1 ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --ro-bind / / --unshare-pid true
+
       # A step that runs out of time fails, which continue-on-error catches; the job running out would be cancelled,
       # failing CI, so the review stops well before the job's own limit.
       - name: Review
         id: claude
-        if: steps.base.outcome == 'success'
+        if: steps.base.outcome == 'success' && steps.git.outcome == 'success' && steps.sandbox.outcome == 'success'
         continue-on-error: true
         timeout-minutes: 35
         uses: anthropics/claude-code-action@9eb012b6d0900c2b9eede65ee1758cec4d2973e9 # v1.0.270
+        # The commands Claude Code runs get its environment without the Claude token, which they could otherwise print
+        # in some form the step that withholds tokens doesn't know.
+        env:
+          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
@@ -301,14 +451,46 @@ jobs:
           # github-actions[bot], which the action refuses unless it's named here. No other bot is, and nothing else
           # starts these runs as one.
           allowed_bots: ${{ github.event_name == 'workflow_dispatch' && 'github-actions[bot]' || '' }}
-          # Only what reading needs: no editing, and no commands but reading the pull request and git. Only the
-          # runner's own settings, never the checkout's .claude/ ones, whose hooks would run the pull request's own
-          # commands with this job's token. Findings come back as data, in the schema below, for the finish job.
+          # Read, Glob, and Grep never reach outside the checkout, whatever the rules below allow them. The commands'
+          # sandbox follows the same rule, so it's given the folder of the git that keeps git to reading: without it,
+          # that git isn't there for them, and plain git, which reads anything in the checkout, runs in its place.
+          settings: '{"permissions":{"blockReadsOutsideWorkingDirectories":true},"sandbox":{"filesystem":{"allowRead":["${{ runner.temp }}/review-bin"]}}}'
+          # Only what reading needs: no editing, and no commands but git (the git the step before keeps to reading),
+          # never gh, whose --jq can print any of its environment. Files only in the checkout (the settings above), and never the process's own
+          # environment under /proc or Claude Code's settings and state, which hold what the job signs in with. Only the runner's own settings,
+          # never the checkout's .claude/ ones, whose hooks would run the pull request's own commands with this job's
+          # token. Findings come back as data, in the schema below, for the finish job.
           claude_args: >-
             --model opus
             --setting-sources user
-            --allowedTools "Skill,Agent,Read,Glob,Grep,Bash(gh pr view:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*)"
+            --allowedTools "Skill,Agent,Read(./**),Glob,Grep,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*)"
+            --disallowedTools "Read(//proc/**),Read(//sys/**),Read(//dev/**),Read(~/.claude/**),Read(~/.claude.json),Read(~/.claude.json.*),Read(~/.config/**),Read(./.git/**)"
             --json-schema '{"type":"object","additionalProperties":false,"required":["findings"],"properties":{"findings":{"type":"array","description":"Every finding of the review, none when it found nothing to raise","items":{"type":"object","additionalProperties":false,"required":["path","line","body"],"properties":{"path":{"type":"string","description":"The file the finding is about, relative to the root of the repository"},"line":{"type":"integer","minimum":1,"description":"The line it is about, in the version of the file in the pull request"},"body":{"type":"string","description":"The finding in Markdown: what is wrong, how it fails, and the fix"}}}}}}'
+
+      # What the review found is posted publicly, so anything in it shaped like a token (an Anthropic key, a GitHub
+      # token) is withheld first, whatever led the review to write it. The findings are read from the review's own
+      # record, the structured output the action reports, never handed to the step in env:, whose values the runner
+      # writes into the job's public log before the step starts.
+      - name: Withhold anything like a token
+        id: findings
+        if: steps.claude.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+        run: |
+          withheld=''
+          if [ -n "$EXECUTION_FILE" ] && [ -f "$EXECUTION_FILE" ]; then
+            withheld=$(jq -c '[.[] | select(.type == "result")] | last // {} | .structured_output // empty
+              | walk(if type == "string" then
+                gsub("(sk-ant-[A-Za-z0-9_-]{8,}|gh[opsur]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,})"; "[withheld: looked like a token]")
+                else . end)' "$EXECUTION_FILE")
+          fi
+          {
+            echo "findings<<FINDINGS_$GITHUB_RUN_ID"
+            echo "$withheld"
+            echo "FINDINGS_$GITHUB_RUN_ID"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Count what it used
         id: usage
