@@ -77,6 +77,16 @@ describe("the audit", () => {
       lines: ["npm ERR! oops"],
     });
     expect(auditOutcome({ stdout: "null", stderr: "" }, ran(none)).failed).toBe(true);
+    // A report that lists no vulnerabilities at all, not even none, isn't one npm writes.
+    for (const stdout of ["{}", "[]", '{"vulnerabilities":[]}', '{"vulnerabilities":null}']) {
+      expect(auditOutcome({ stdout, stderr: "" }, ran(none)), stdout).toEqual({
+        failed: true,
+        lines: ["npm audit gave no report."],
+      });
+      expect(auditOutcome(ran(none), { stdout, stderr: "" }).lines, stdout).toEqual([
+        "npm audit --omit=dev gave no report.",
+      ]);
+    }
     expect(auditOutcome(ran(none), ran({ error: { summary: "registry down" } }))).toEqual({
       failed: true,
       lines: ["npm audit --omit=dev didn't run: registry down"],

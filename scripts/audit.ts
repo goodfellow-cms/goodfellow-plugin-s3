@@ -49,6 +49,10 @@ export function unignoredAdvisories(report: AuditReport, ignored: Record<string,
   return [...advisories(report)].filter(([id]) => !isIgnored(id, ignored)).map(([, line]) => line);
 }
 
+/** Whether a value is a JSON object, not a list or `null`. */
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
 /** A run's report, or why there's none: npm not starting, no JSON, or npm saying it couldn't audit. */
 function reportOf(run: AuditRun, what: string): AuditReport | string {
   if (run.error) return `npm audit${what} didn't start: ${run.error.message}`;
@@ -58,10 +62,12 @@ function reportOf(run: AuditRun, what: string): AuditReport | string {
   } catch {
     return run.stderr?.trim() || `npm audit${what} gave no report.`;
   }
-  if (typeof report !== "object" || report === null) return `npm audit${what} gave no report.`;
+  if (!isRecord(report)) return `npm audit${what} gave no report.`;
   // Such as the registry not answering: that's not an audit that passed.
   const error = (report as AuditReport).error;
   if (error) return `npm audit${what} didn't run: ${error.summary ?? JSON.stringify(error)}`;
+  // Every report npm writes lists its vulnerabilities, none included, so one without them isn't an audit that passed.
+  if (!isRecord(report.vulnerabilities)) return `npm audit${what} gave no report.`;
   return report as AuditReport;
 }
 
