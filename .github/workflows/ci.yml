@@ -29,7 +29,8 @@ jobs:
         with:
           node-version: 24
           check-latest: true
-      - run: npm audit
+      # npm audit, leaving out the advisories scripts/audit.ts lists, with why each can't reach sites.
+      - run: node scripts/audit.ts
 
   check:
     runs-on: ubuntu-latest
